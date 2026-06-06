@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+
+// Main bid request message
+message BidRequest {
+    string id = 1;
+    repeated Impression imp = 2;
+    User user = 3;
+    Device device = 4;
+    Site site = 5;
+    App app = 6;
+}
+
+message Impression {
+    string id = 1;
+    Banner banner = 2;
+    Video video = 3;
+    float bidfloor = 4;
+}
+
+message Banner {
+    repeated int32 w = 1;
+    repeated int32 h = 2;
+    repeated string mimes = 3;
+}
+
+message Video {
+    repeated string mimes = 1;
+    int32 minduration = 2;
+    int32 maxduration = 3;
+}
+
+message User {
+    string id = 1;
+    string buyeruid = 2;
+    Geo geo = 3;
+}
+
+message Device {
+    string ip = 1;
+    string ua = 2;
+    Geo geo = 3;
+}
+
+message Geo { 
+    float lat = 1;
+    float lon = 2;
+    string country = 3;
+    string city = 4;
+}
+
+message Site {
+    string id = 1;
+    string domain = 2;
+}
+
+message App {
+    string id = 1;
+    string bundle = 2;
+}
+
+// Main bid response message
+message BidResponse {
+    string id = 1;
+    repeated SeatBid seatbid = 2;
+    string currency = 3;
+}
+
+message SeatBid {
+    repeated Bid bid = 1;
+    string seat = 2;
+}
+
+message Bid {
+    string id = 1;
+    string impid = 2;
+    float price = 3;
+    string adid = 4;
+    string adm = 5;  // Ad markup
+    string nurl = 6; // Win notice URL
+}

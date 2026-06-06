@@ -1,0 +1,62 @@
+# 默认配置
+server:
+  port: 7721
+  taskEnable: true
+  analysisLogFlag: false
+  servlet:
+    context-path: /
+spring:
+  application:
+    name: springboot-scaffold
+  profiles:
+    active: prod0320
+  jackson:
+    time-zone: Asia/Shanghai
+
+# mybatis-plus
+mybatis-plus:
+  configuration:
+    cache-enabled: true
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  mapper-locations: classpath:mapper/*.xml
+  typeAliasesPackage: com.leeyom.scaffold.domain.entity
+
+# 监控
+javamelody:
+  enabled: false
+  init-parameters:
+    log: false
+
+#广告筛选策略
+strategy: bid_one_per_1000
+
+bidUrl: https://dsp.globalgoogleplay.com/prod/rtb/bid
+
+logRootPath: /home/luoxun/logs
+logKeepMax: 20
+
+sys:
+  coreThreadNum: 20
+  maxThreadNum: 200
+  liveTime: 30
+  capacity: 108000
+  threadName: httpclient
+
+# 任务配置（JSON格式）
+# 注意: 只有 targetElement 为 "click_ad" 时，params 才包含 x, y 坐标；其他情况下 params 为空对象 {}
+kwaiadsinfo:
+  #tasks: '[{"targetElement":"main_activity","params":{},"targetPage":null,"delay":1000},{"targetElement":"navigate_interstitial","params":{},"targetPage":null,"delay":1500},{"targetElement":"click_load","params":{},"targetPage":null,"delay":500},{"targetElement":"click_show","params":{},"targetPage":null,"delay":1800},{"targetElement":"click_ad","params":{"x":20.99,"y":40.01},"targetPage":null,"delay":3200}]'
+  tasks: 'Error task config'
+
+app:
+  #OSS文件上传
+  oss:
+    endpoint: oss-ap-southeast-1-internal.aliyuncs.com
+    accessKey: ${ALIYUN_OSS_ACCESS_KEY:}
+    secretKey: ${ALIYUN_OSS_SECRET_KEY:}
+    bucketName: sg-ads
+    staticDomain: oss-ap-southeast-1-internal.aliyuncs.com

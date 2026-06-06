@@ -1,0 +1,11 @@
+# *****************************生产环境*****************************
+# 默认配置
+server:
+  port: 9380
+# 数据库
+spring:
+  datasource:
+    driverClassName: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://172.19.0.3:3306/scaffold?useUnicode=true&useSSL=true&autoReconnect=true&allowMultiQueries=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: scaffold
+    password: mysql_TRcCjD

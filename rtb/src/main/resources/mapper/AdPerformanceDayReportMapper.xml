@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.leeyom.scaffold.mapper.AdPerformanceDayReportMapper">
+
+    <!-- 通用查询映射结果 -->
+    <resultMap id="BaseResultMap" type="com.leeyom.scaffold.domain.entity.AdPerformanceDayReport">
+        <id column="date" property="date" />
+        <id column="bid_times" property="bidTimes" />
+        <id column="impressions" property="impressions" />
+        <id column="spend" property="spend" />
+        <id column="avg_cpm" property="avgCpm" />
+        <id column="bid_success_rate" property="bidSuccessRate" />
+        <id column="log_file_count" property="logFileCount" />
+        <id column="server_3_20" property="server320" />
+        <id column="server_175_56" property="server17556" />
+    </resultMap>
+
+    <!-- 通用查询结果列 -->
+    <sql id="Base_Column_List">
+        date,
+        bid_times,
+        impressions,
+        spend,
+        avg_cpm,
+        bid_success_rate,
+        log_file_count,
+        server_3_20,
+        server_175_56
+    </sql>
+
+    <insert id="batchInsert" parameterType="java.util.List">
+        insert into ad_performance_day_report ( <include refid="Base_Column_List"/>) values
+        <foreach collection="list" item="item" separator=",">
+            (
+            #{item.date} ,
+            #{item.bidTimes} ,
+            #{item.impressions} ,
+            #{item.spend} ,
+            #{item.avgCpm} ,
+            #{item.bidSuccessRate} ,
+            #{item.logFileCount} ,
+            #{item.server320} ,
+            #{item.server17556} 
+            )
+        </foreach>
+    </insert>
+</mapper>

@@ -1,0 +1,13 @@
+# *****************************生产环境*****************************
+# 默认配置
+server:
+  port: 7720
+  taskEnable: true
+  analysisLogFlag: true
+# 数据库
+spring:
+  datasource:
+    driverClassName: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://1Panel-mysql-aREQ:3306/scaffold?useUnicode=true&useSSL=true&autoReconnect=true&allowMultiQueries=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: scaffold
+    password: GcPPNMeDBpeSmpp2

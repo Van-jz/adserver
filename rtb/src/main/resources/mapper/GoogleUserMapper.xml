@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.leeyom.scaffold.mapper.GoogleUserMapper">
+
+    <!-- 通用查询映射结果 -->
+    <resultMap id="BaseResultMap" type="com.leeyom.scaffold.domain.entity.GoogleUser">
+        <id column="guid" property="guid" />
+        <id column="day" property="day" />
+    </resultMap>
+
+    <!-- 通用查询结果列 -->
+    <sql id="Base_Column_List">
+        guid,
+        day
+    </sql>
+
+    <insert id="batchInsert" parameterType="java.util.List">
+        insert ignore google_user ( <include refid="Base_Column_List"/>) values
+        <foreach collection="list" item="item" separator=",">
+            (
+            #{item.guid} ,
+            #{item.day} 
+            )
+        </foreach>
+    </insert>
+
+    <select id="countGuidByDay" resultType="java.lang.Long">
+        SELECT count(1) from google_user
+        where day = #{day}
+    </select>
+</mapper>

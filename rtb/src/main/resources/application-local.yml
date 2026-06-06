@@ -1,0 +1,17 @@
+# *****************************开发环境*****************************
+
+# 数据库
+spring:
+  datasource:
+    driverClassName: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/scaffold?useUnicode=true&useSSL=true&autoReconnect=true&allowMultiQueries=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+
+# 本地测试日志路径
+logRootPath: /tmp/springboot-scaffold/logs
+
+# 日志级别
+#logging:
+#  level:
+#    com.leeyom.scaffold.mapper: debug

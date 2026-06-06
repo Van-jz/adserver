@@ -1,0 +1,70 @@
+2025-12-29 00:40:01,613 - INFO - ================================================================================
+2025-12-29 00:40:01,613 - INFO - 开始处理 - 时间: 2025-12-29 00:40:01
+2025-12-29 00:40:01,613 - INFO - ================================================================================
+2025-12-29 00:40:01,613 - INFO - 正在加载 pixelid-token 映射...
+2025-12-29 00:40:01,614 - INFO - 成功加载 42 条 pixelid-token 映射关系
+2025-12-29 00:40:01,614 - INFO - 正在解析 clicks 文件...
+2025-12-29 00:40:01,614 - INFO - 成功解析 5 条 clicks 数据
+2025-12-29 00:40:01,614 - INFO - 开始处理 5 条记录...
+2025-12-29 00:40:01,614 - INFO - 处理第 1/5 条记录 - pixelid: 287474931331307 deepLink: 
+2025-12-29 00:40:01,614 - WARNING - 未找到 pixelid '287474931331307 deepLink: ' 对应的 token，跳过
+2025-12-29 00:40:01,614 - INFO - 处理第 2/5 条记录 - pixelid: 287474931331307 deepLink: 
+2025-12-29 00:40:01,614 - WARNING - 未找到 pixelid '287474931331307 deepLink: ' 对应的 token，跳过
+2025-12-29 00:40:01,614 - INFO - 处理第 3/5 条记录 - pixelid: 294401748837307 deepLink: 
+2025-12-29 00:40:01,614 - WARNING - 未找到 pixelid '294401748837307 deepLink: ' 对应的 token，跳过
+2025-12-29 00:40:01,614 - INFO - 处理第 4/5 条记录 - pixelid: 294401748837307 deepLink: 
+2025-12-29 00:40:01,615 - WARNING - 未找到 pixelid '294401748837307 deepLink: ' 对应的 token，跳过
+2025-12-29 00:40:01,615 - INFO - 处理第 5/5 条记录 - pixelid: 296987197445307 deepLink: 
+2025-12-29 00:40:01,615 - WARNING - 未找到 pixelid '296987197445307 deepLink: ' 对应的 token，跳过
+2025-12-29 00:40:01,615 - INFO - ================================================================================
+2025-12-29 00:40:01,615 - INFO - 处理完成统计:
+2025-12-29 00:40:01,615 - INFO -   总记录数: 5
+2025-12-29 00:40:01,615 - INFO -   生成URL数: 0
+2025-12-29 00:40:01,615 - INFO -   成功: 0
+2025-12-29 00:40:01,615 - INFO -   失败: 0
+2025-12-29 00:40:01,615 - INFO -   缺少token: 5
+2025-12-29 00:40:01,615 - INFO -   成功率: 0%
+2025-12-29 00:40:01,615 - INFO - ================================================================================
+2025-12-29 00:50:02,102 - INFO - ================================================================================
+2025-12-29 00:50:02,102 - INFO - 开始处理 - 时间: 2025-12-29 00:50:02
+2025-12-29 00:50:02,102 - INFO - ================================================================================
+2025-12-29 00:50:02,102 - INFO - 正在加载 pixelid-token 映射...
+2025-12-29 00:50:02,103 - INFO - 成功加载 42 条 pixelid-token 映射关系
+2025-12-29 00:50:02,103 - INFO - 正在解析 clicks 文件...
+2025-12-29 00:50:02,103 - INFO - 成功解析 5 条 clicks 数据
+2025-12-29 00:50:02,103 - INFO - 开始处理 5 条记录...
+2025-12-29 00:50:02,103 - INFO - 处理第 1/5 条记录 - pixelid: 287474931331307
+2025-12-29 00:50:02,103 - INFO - 生成 1 个 URL
+2025-12-29 00:50:02,103 - INFO - 发送请求 1/1: https://www.adsnebula.com/log/common/gapi?access_token=YA6OtIRdtaMKAAY_xOXuRqx6lZ0EmdcDnRcNJXMtdVI&pixelId=287474931331307&clickid=cFNvaA-3aPM_BBPxICOVGaz1jUci0oFCKNHHXa54Ri1AfA1W0ithJ8V-N7v8K47TCdSqSdYHDXaJynEOe6bXJXBo9YWT5nJLLBHOXjJPaxhaTT-u5uDcKR43Y4aD-MJIgPo7Sq9poYLqQBBIthJrug==&event_name=EVENT_COMPLETE_REGISTRATION&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false
+2025-12-29 00:50:02,328 - INFO - 请求成功 - HTTP 200 - 响应: {"result":1}
+2025-12-29 00:50:07,333 - INFO - 处理第 2/5 条记录 - pixelid: 287474931331307
+2025-12-29 00:50:07,333 - INFO - 生成 2 个 URL
+2025-12-29 00:50:07,333 - INFO - 发送请求 1/2: https://www.adsnebula.com/log/common/gapi?access_token=YA6OtIRdtaMKAAY_xOXuRqx6lZ0EmdcDnRcNJXMtdVI&pixelId=287474931331307&clickid=ZfaOWeG1irYhjyMe-NZbgntFuxZX3QilG8uRTW8EZ05sope-U-tR5gzQ86NnzJ5uueuSkLGVgTbUpWAyBngcSA2h10FB_u0BBW0LC2N3886NpVpeTGSHPmuChdJ3bt2vSTyX9LGXUIQOzQBpAaMLDw==&event_name=EVENT_COMPLETE_REGISTRATION&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false
+2025-12-29 00:50:07,406 - INFO - 请求成功 - HTTP 200 - 响应: {"result":1}
+2025-12-29 00:50:12,408 - INFO - 发送请求 2/2: https://www.adsnebula.com/log/common/gapi?access_token=YA6OtIRdtaMKAAY_xOXuRqx6lZ0EmdcDnRcNJXMtdVI&pixelId=287474931331307&clickid=ZfaOWeG1irYhjyMe-NZbgntFuxZX3QilG8uRTW8EZ05sope-U-tR5gzQ86NnzJ5uueuSkLGVgTbUpWAyBngcSA2h10FB_u0BBW0LC2N3886NpVpeTGSHPmuChdJ3bt2vSTyX9LGXUIQOzQBpAaMLDw==&event_name=EVENT_PURCHASE&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false&currency=BRL&value=20
+2025-12-29 00:50:12,513 - INFO - 请求成功 - HTTP 200 - 响应: {"result":1}
+2025-12-29 00:50:17,518 - INFO - 处理第 3/5 条记录 - pixelid: 294401748837307
+2025-12-29 00:50:17,518 - INFO - 生成 2 个 URL
+2025-12-29 00:50:17,519 - INFO - 发送请求 1/2: https://www.adsnebula.com/log/common/gapi?access_token=VADiEBw8G2hM8DIKBqMBiQuU-CZ2CMO1xkuyGZ21ri8&pixelId=294401748837307&clickid=0Me0R0ZPhn74U_6YziuJc9UHOyvWHadYRxzIOVbQHEw9bXaq5JUseyoOi958Ew-kMgJiiMDF_ANxrj01SVKy4wUG293EFH_AoIPVAYnsN1-RTtg-sMX2V0SBIhcHOr4e&event_name=EVENT_COMPLETE_REGISTRATION&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false
+2025-12-29 00:50:17,626 - INFO - 请求成功 - HTTP 200 - 响应: {"result":10006,"error_msg":"token不合法，请求被拒绝"}
+2025-12-29 00:50:22,631 - INFO - 发送请求 2/2: https://www.adsnebula.com/log/common/gapi?access_token=VADiEBw8G2hM8DIKBqMBiQuU-CZ2CMO1xkuyGZ21ri8&pixelId=294401748837307&clickid=0Me0R0ZPhn74U_6YziuJc9UHOyvWHadYRxzIOVbQHEw9bXaq5JUseyoOi958Ew-kMgJiiMDF_ANxrj01SVKy4wUG293EFH_AoIPVAYnsN1-RTtg-sMX2V0SBIhcHOr4e&event_name=EVENT_PURCHASE&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false&currency=BRL&value=30
+2025-12-29 00:50:22,736 - INFO - 请求成功 - HTTP 200 - 响应: {"result":10006,"error_msg":"token不合法，请求被拒绝"}
+2025-12-29 00:50:27,739 - INFO - 处理第 4/5 条记录 - pixelid: 294401748837307
+2025-12-29 00:50:27,740 - INFO - 生成 2 个 URL
+2025-12-29 00:50:27,740 - INFO - 发送请求 1/2: https://www.adsnebula.com/log/common/gapi?access_token=VADiEBw8G2hM8DIKBqMBiQuU-CZ2CMO1xkuyGZ21ri8&pixelId=294401748837307&clickid=9LHmeeQbKwf_fanDD5yVHOXocvMiuxFiWoPnWp_csaqsP2D9gGV0qTFZglmLSTa34c-Nv_YjU6weOuIPROHSF1Gl9UHpy6TGsjy0ySEgM2yvIq50wdg41NKq5HBANF7D&event_name=EVENT_COMPLETE_REGISTRATION&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false
+2025-12-29 00:50:27,843 - INFO - 请求成功 - HTTP 200 - 响应: {"result":10006,"error_msg":"token不合法，请求被拒绝"}
+2025-12-29 00:50:32,847 - INFO - 发送请求 2/2: https://www.adsnebula.com/log/common/gapi?access_token=VADiEBw8G2hM8DIKBqMBiQuU-CZ2CMO1xkuyGZ21ri8&pixelId=294401748837307&clickid=9LHmeeQbKwf_fanDD5yVHOXocvMiuxFiWoPnWp_csaqsP2D9gGV0qTFZglmLSTa34c-Nv_YjU6weOuIPROHSF1Gl9UHpy6TGsjy0ySEgM2yvIq50wdg41NKq5HBANF7D&event_name=EVENT_PURCHASE&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false&currency=BRL&value=30
+2025-12-29 00:50:32,949 - INFO - 请求成功 - HTTP 200 - 响应: {"result":10006,"error_msg":"token不合法，请求被拒绝"}
+2025-12-29 00:50:37,951 - INFO - 处理第 5/5 条记录 - pixelid: 296987197445307
+2025-12-29 00:50:37,952 - INFO - 生成 1 个 URL
+2025-12-29 00:50:37,952 - INFO - 发送请求 1/1: https://www.adsnebula.com/log/common/gapi?access_token=Co-xs2x4sejvxk8O8JkJMuJv1aCsbBZOBnegZrUSwiA&pixelId=296987197445307&clickid=VuYY09SfzcKMXZ7zmYRmPVhWCmi__78iv_G6OXEtfNcXTWzMGHfdebB_BR0gIfVh3y3oYmJVbfkyJPyUFDHnaGWO3Og8-vHjUwoETsPVEk_kxA9ue-9PeffdN-QIJkqO&event_name=EVENT_COMPLETE_REGISTRATION&mmpcode=PL&pixelSdkVersion=9.9.9&is_attributed=1&testFlag=false&trackFlag=false
+2025-12-29 00:50:38,024 - INFO - 请求成功 - HTTP 200 - 响应: {"result":1}
+2025-12-29 00:50:38,024 - INFO - ================================================================================
+2025-12-29 00:50:38,024 - INFO - 处理完成统计:
+2025-12-29 00:50:38,024 - INFO -   总记录数: 5
+2025-12-29 00:50:38,024 - INFO -   生成URL数: 8
+2025-12-29 00:50:38,024 - INFO -   成功: 8
+2025-12-29 00:50:38,024 - INFO -   失败: 0
+2025-12-29 00:50:38,024 - INFO -   缺少token: 0
+2025-12-29 00:50:38,025 - INFO -   成功率: 100.00%
+2025-12-29 00:50:38,025 - INFO - ================================================================================

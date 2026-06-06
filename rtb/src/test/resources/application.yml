@@ -1,0 +1,58 @@
+# 测试环境配置
+# 覆盖生产环境的日志路径为相对路径
+logRootPath: ./logs/springboot-scaffold
+
+server:
+  port: 7721
+  taskEnable: false
+  analysisLogFlag: false
+
+spring:
+  datasource:
+    driverClassName: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/scaffold?useUnicode=true&useSSL=false&autoReconnect=true&allowMultiQueries=true&characterEncoding=utf8&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+  application:
+    name: springboot-scaffold
+  profiles:
+    active: test
+
+# mybatis-plus
+mybatis-plus:
+  configuration:
+    cache-enabled: true
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  mapper-locations: classpath:mapper/*.xml
+  typeAliasesPackage: com.leeyom.scaffold.domain.entity
+
+# 监控
+javamelody:
+  enabled: false
+
+#广告筛选策略
+strategy: bid_one_per_1000
+
+bidUrl: https://dsp.globalgoogleplay.com/test/rtb/bid
+
+logKeepMax: 20
+
+sys:
+  coreThreadNum: 20
+  maxThreadNum: 200
+  liveTime: 30
+  capacity: 108000
+  threadName: httpclient
+
+app:
+  #OSS文件上传
+  oss:
+    endpoint: oss-ap-southeast-1.aliyuncs.com
+    accessKey: test
+    secretKey: test
+    bucketName: test
+    staticDomain: oss-ap-southeast-1.aliyuncs.com

@@ -1,0 +1,53 @@
+2025-02-24 00:18:03 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-24 00:18:03 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 22:52:14 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-26 22:52:14 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 23:01:19 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:01:19 INFO 127.0.0.1 - - [26/Feb/2025 23:01:19] "POST / HTTP/1.0" 200 -
+2025-02-26 23:19:08 INFO 127.0.0.1 - - [26/Feb/2025 23:19:08] "[31m[1mGET / HTTP/1.0[0m" 405 -
+2025-02-26 23:26:12 INFO 127.0.0.1 - - [26/Feb/2025 23:26:12] "[31m[1mGET / HTTP/1.0[0m" 405 -
+2025-02-26 23:26:23 INFO 127.0.0.1 - - [26/Feb/2025 23:26:23] "[33mGET /favicon.ico HTTP/1.0[0m" 404 -
+2025-02-26 23:33:01 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:33:01 INFO 127.0.0.1 - - [26/Feb/2025 23:33:01] "POST / HTTP/1.0" 200 -
+2025-02-26 23:33:27 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-26 23:33:27 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 23:33:35 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:33:35 INFO 127.0.0.1 - - [26/Feb/2025 23:33:35] "POST / HTTP/1.0" 200 -
+2025-02-26 23:33:55 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-26 23:33:55 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 23:34:11 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:34:11 INFO 127.0.0.1 - - [26/Feb/2025 23:34:11] "POST / HTTP/1.0" 200 -
+2025-02-26 23:34:37 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:34:37 INFO 127.0.0.1 - - [26/Feb/2025 23:34:37] "POST / HTTP/1.0" 200 -
+2025-02-26 23:35:13 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-26 23:35:13 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 23:35:22 ERROR json data
+2025-02-26 23:35:22 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:35:22 INFO 127.0.0.1 - - [26/Feb/2025 23:35:22] "POST / HTTP/1.0" 200 -
+2025-02-26 23:36:04 ERROR pb data
+2025-02-26 23:36:04 ERROR "{\n  \"id\": \"bid_123\",\n  \"imp\": [\n    {\n      \"id\": \"imp_1\",\n      \"banner\": {\n        \"w\": [\n          300\n        ],\n        \"h\": [\n          250\n        ]\n      }\n    }\n  ],\n  \"user\": {\n    \"geo\": {\n      \"country\": \"US\"\n    }\n  }\n}"
+2025-02-26 23:36:04 INFO 127.0.0.1 - - [26/Feb/2025 23:36:04] "POST / HTTP/1.0" 200 -
+2025-02-26 23:45:17 INFO 127.0.0.1 - - [26/Feb/2025 23:45:17] "GET /win?auction_id=asdfw23 HTTP/1.0" 200 -
+2025-02-26 23:45:18 INFO 127.0.0.1 - - [26/Feb/2025 23:45:18] "[33mGET /favicon.ico HTTP/1.0[0m" 404 -
+2025-02-26 23:45:20 INFO 127.0.0.1 - - [26/Feb/2025 23:45:20] "[31m[1mGET / HTTP/1.0[0m" 405 -
+2025-02-26 23:49:51 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.31.102.186:5000
+2025-02-26 23:49:51 INFO [33mPress CTRL+C to quit[0m
+2025-02-26 23:49:56 INFO 127.0.0.1 - - [26/Feb/2025 23:49:56] "GET /imp?auction_id=asdfw23 HTTP/1.0" 200 -

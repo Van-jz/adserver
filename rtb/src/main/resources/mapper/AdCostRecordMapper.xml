@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.leeyom.scaffold.mapper.AdCostRecordMapper">
+
+    <!-- 通用查询映射结果 -->
+    <resultMap id="BaseResultMap" type="com.leeyom.scaffold.domain.entity.AdCostRecord">
+        <id column="id" property="id"/>
+        <id column="day" property="day"/>
+        <id column="bidid" property="bidid"/>
+        <id column="adid" property="adid"/>
+        <id column="price" property="price"/>
+    </resultMap>
+
+    <!-- 通用查询结果列 -->
+    <sql id="Base_Column_List">
+        id,
+        day,
+        bidid,
+        adid,
+        price
+    </sql>
+
+    <select id="selectSumByDay" resultType="com.leeyom.scaffold.domain.vo.AdCostDayTotalVO">
+        SELECT SUM(price) totalCost , count(1) rowNumber FROM ad_cost_record
+        WHERE day = #{day}
+    </select>
+
+    <insert id="batchInsert" parameterType="java.util.List">
+        insert ignore ad_cost_record (<include refid="Base_Column_List"/>) values
+        <foreach collection="list" item="item" separator=",">
+            (
+            #{item.id} ,
+            #{item.day} ,
+            #{item.bidid} ,
+            #{item.adid} ,
+            #{item.price}
+            )
+        </foreach>
+    </insert>
+</mapper>
