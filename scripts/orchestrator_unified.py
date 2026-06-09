@@ -159,12 +159,202 @@ def extract_urls_from_data(json_data: Dict[str, Any]) -> list:
         return []
 
 
+def _bundle_map_warn(logger: Optional[logging.Logger], message: str) -> None:
+    """输出 bundle map 兼容处理警告。"""
+    if logger:
+        logger.warning(message)
+    else:
+        print(f"警告: {message}", file=sys.stderr)
+
+
+def _parse_bundle_timestamp(value: Any) -> Optional[int]:
+    """解析 Unix 秒级时间戳，非法时返回 None。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        timestamp = int(value)
+        return timestamp if timestamp >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def load_bundle_map(
+    bundle_map_file: str,
+    logger: Optional[logging.Logger] = None
+) -> Tuple[Dict[str, Dict[str, Any]], bool, Dict[str, int]]:
+    """
+    加载 click_id -> bundle 映射，并统一迁移为:
+    click_id -> {'bundle': bundle, 'timestamp': unix_seconds}
+
+    Returns:
+        (normalized_map, changed, stats)
+    """
+    stats = {
+        'total': 0,
+        'migrated': 0,
+        'timestamp_fixed': 0,
+        'skipped_invalid': 0
+    }
+    if not bundle_map_file:
+        return {}, False, stats
+
+    try:
+        with open(bundle_map_file, 'r', encoding='utf-8') as f:
+            raw_map = json.load(f)
+    except FileNotFoundError:
+        return {}, False, stats
+    except json.JSONDecodeError as e:
+        _bundle_map_warn(logger, f"bundle 映射文件格式错误，忽略本次加载: {e}")
+        return {}, False, stats
+
+    if not isinstance(raw_map, dict):
+        _bundle_map_warn(logger, "bundle 映射文件根节点不是对象，忽略本次加载")
+        return {}, False, stats
+
+    now_ts = int(time.time())
+    normalized = {}
+    changed = False
+    stats['total'] = len(raw_map)
+
+    for click_id, entry in raw_map.items():
+        if not isinstance(click_id, str) or not click_id:
+            stats['skipped_invalid'] += 1
+            changed = True
+            _bundle_map_warn(logger, f"跳过无效 click_id: {click_id}")
+            continue
+
+        if isinstance(entry, str):
+            if not entry:
+                stats['skipped_invalid'] += 1
+                changed = True
+                _bundle_map_warn(logger, f"跳过空 bundle 记录: {click_id}")
+                continue
+            normalized[click_id] = {'bundle': entry, 'timestamp': now_ts}
+            stats['migrated'] += 1
+            changed = True
+            continue
+
+        if isinstance(entry, dict):
+            bundle = entry.get('bundle')
+            if not isinstance(bundle, str) or not bundle:
+                stats['skipped_invalid'] += 1
+                changed = True
+                _bundle_map_warn(logger, f"跳过缺少有效 bundle 的记录: {click_id}")
+                continue
+
+            timestamp = _parse_bundle_timestamp(entry.get('timestamp'))
+            if timestamp is None:
+                timestamp = now_ts
+                stats['timestamp_fixed'] += 1
+                changed = True
+
+            normalized_entry = {'bundle': bundle, 'timestamp': timestamp}
+            normalized[click_id] = normalized_entry
+            if entry != normalized_entry:
+                changed = True
+            continue
+
+        stats['skipped_invalid'] += 1
+        changed = True
+        _bundle_map_warn(logger, f"跳过无效 bundle map 记录: {click_id}")
+
+    return normalized, changed, stats
+
+
+def save_bundle_map(bundle_map_file: str, bundle_map: Dict[str, Dict[str, Any]], logger: Optional[logging.Logger] = None) -> bool:
+    """保存标准格式的 bundle map。"""
+    if not bundle_map_file:
+        return False
+    try:
+        with open(bundle_map_file, 'w', encoding='utf-8') as f:
+            json.dump(bundle_map, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        _bundle_map_warn(logger, f"保存 bundle 映射失败: {e}")
+        return False
+
+
+def get_bundle_from_map_entry(entry: Any) -> Optional[str]:
+    """兼容旧/新格式，提取 bundle 字符串。"""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        bundle = entry.get('bundle')
+        return bundle if isinstance(bundle, str) else None
+    return None
+
+
+def update_bundle_map_entry(
+    bundle_map: Dict[str, Dict[str, Any]],
+    click_id: str,
+    referrer_package: str,
+    logger: Optional[logging.Logger] = None
+) -> Tuple[bool, bool]:
+    """
+    新增或刷新 click_id 的 timestamp。
+
+    Returns:
+        (changed, is_new)
+    """
+    now_ts = int(time.time())
+    entry = bundle_map.get(click_id)
+    if entry is None:
+        bundle_map[click_id] = {'bundle': referrer_package, 'timestamp': now_ts}
+        return True, True
+
+    existing_bundle = get_bundle_from_map_entry(entry)
+    if existing_bundle and existing_bundle != referrer_package:
+        _bundle_map_warn(logger, f"click_id {click_id} 的 bundle 不一致，保留旧值: {existing_bundle}, 本次: {referrer_package}")
+
+    bundle = existing_bundle or referrer_package
+    old_entry = entry.copy() if isinstance(entry, dict) else entry
+    bundle_map[click_id] = {'bundle': bundle, 'timestamp': now_ts}
+    return bundle_map[click_id] != old_entry, False
+
+
+def cleanup_loaded_bundle_map(
+    bundle_map: Dict[str, Dict[str, Any]],
+    retention_days: int,
+    load_stats: Dict[str, int]
+) -> Dict[str, int]:
+    """对已加载到内存的 bundle map 执行可选清理。"""
+    deleted_count = 0
+
+    if retention_days >= 0:
+        cutoff_ts = int(time.time()) - retention_days * 86400
+        expired_click_ids = [
+            click_id
+            for click_id, entry in bundle_map.items()
+            if _parse_bundle_timestamp(entry.get('timestamp')) is not None
+            and int(entry['timestamp']) < cutoff_ts
+        ]
+        for click_id in expired_click_ids:
+            del bundle_map[click_id]
+        deleted_count = len(expired_click_ids)
+
+    return {
+        'loaded': load_stats['total'],
+        'migrated': load_stats['migrated'],
+        'timestamp_fixed': load_stats['timestamp_fixed'],
+        'skipped_invalid': load_stats['skipped_invalid'],
+        'deleted': deleted_count,
+        'remaining': len(bundle_map),
+        'retention_days': retention_days,
+        'cleanup_enabled': 1 if retention_days >= 0 else 0,
+        'changed': 1 if deleted_count > 0 else 0
+    }
+
+
 def process_log_file_incremental(
     file_path: str,
     output_file: str,
     pixelid_token_cnt_file: Optional[str] = None,
     start_position: int = 0,
-    bundle_map_file: str = None
+    bundle_map_file: str = None,
+    click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    bundle_map_changed: bool = False,
+    bundle_map_load_stats: Optional[Dict[str, int]] = None,
+    save_bundle_map_on_change: bool = True
 ) -> Dict[str, Any]:
     """
     增量处理日志文件，从指定位置开始
@@ -175,6 +365,10 @@ def process_log_file_incremental(
         pixelid_token_cnt_file: pixelid_token_cnt.txt 文件路径
         start_position: 开始处理的文件字节位置
         bundle_map_file: click_id -> bundle 映射文件路径
+        click_id_bundle_map: 已加载到内存的 click_id -> bundle 映射
+        bundle_map_changed: 传入映射在调用前是否已有变更
+        bundle_map_load_stats: 传入映射对应的加载统计
+        save_bundle_map_on_change: 映射变更后是否由本函数写回文件
 
     Returns:
         处理结果字典，包含统计信息和新的文件位置
@@ -186,14 +380,11 @@ def process_log_file_incremental(
     # 用于 click_id 去重
     click_id_set = set()
 
-    # 加载已有的 click_id -> bundle 映射
-    click_id_bundle_map = {}
-    if bundle_map_file:
-        try:
-            with open(bundle_map_file, 'r', encoding='utf-8') as f:
-                click_id_bundle_map = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+    # 加载已有的 click_id -> bundle 映射，并兼容迁移旧格式
+    if click_id_bundle_map is None:
+        click_id_bundle_map, bundle_map_changed, bundle_map_load_stats = load_bundle_map(bundle_map_file)
+    if bundle_map_load_stats is None:
+        bundle_map_load_stats = {'migrated': 0, 'timestamp_fixed': 0, 'skipped_invalid': 0}
 
     stats = {
         'total_log_count': 0,
@@ -205,6 +396,10 @@ def process_log_file_incremental(
         'url_after_dedup': 0,
         'matched_url_count': 0,
         'bundle_found_count': 0,  # 找到 bundle 的数量
+        'bundle_timestamp_updated_count': 0,
+        'bundle_map_migrated_count': bundle_map_load_stats['migrated'],
+        'bundle_map_timestamp_fixed_count': bundle_map_load_stats['timestamp_fixed'],
+        'bundle_map_invalid_count': bundle_map_load_stats['skipped_invalid'],
         'end_position': start_position,
         'processed_bytes': 0
     }
@@ -279,10 +474,14 @@ def process_log_file_incremental(
                                 continue
                             if click_id:
                                 click_id_set.add(click_id)
-                                # 保存 click_id -> bundle 映射
-                                if referrer_package and click_id not in click_id_bundle_map:
-                                    click_id_bundle_map[click_id] = referrer_package
-                                    stats['bundle_found_count'] += 1
+                                # 保存 click_id -> bundle 映射，并刷新命中记录的 timestamp
+                                if referrer_package:
+                                    changed, is_new = update_bundle_map_entry(click_id_bundle_map, click_id, referrer_package)
+                                    bundle_map_changed = bundle_map_changed or changed
+                                    if is_new:
+                                        stats['bundle_found_count'] += 1
+                                    elif changed:
+                                        stats['bundle_timestamp_updated_count'] += 1
                             stats['url_after_dedup'] += 1
                             should_write = not pixelid_set or (pixel_id and pixel_id in pixelid_set)
                             if should_write:
@@ -298,13 +497,10 @@ def process_log_file_incremental(
                 stats['processed_bytes'] = stats['end_position'] - start_position
 
         # 保存 click_id -> bundle 映射
-        if bundle_map_file and click_id_bundle_map:
-            try:
-                with open(bundle_map_file, 'w', encoding='utf-8') as f:
-                    json.dump(click_id_bundle_map, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                print(f"警告: 保存 bundle 映射失败: {e}", file=sys.stderr)
+        if bundle_map_file and bundle_map_changed and save_bundle_map_on_change:
+            save_bundle_map(bundle_map_file, click_id_bundle_map)
 
+        stats['bundle_map_changed'] = 1 if bundle_map_changed else 0
         return stats
 
     except FileNotFoundError:
@@ -426,7 +622,9 @@ def apply_frequency_control(
     pixelid_token_cnt_file: str = None,
     cnt_rate: float = 1.0,
     bundle_ratio: Dict[str, float] = None,
-    bundle_map_file: str = None
+    bundle_map_file: str = None,
+    click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    save_bundle_map_on_change: bool = True
 ) -> Dict[str, any]:
     """
     应用频率控制规则：每个pixel_id每天最多处理指定数量的URL，然后应用总体比例限制
@@ -444,6 +642,8 @@ def apply_frequency_control(
         cnt_rate: 转化率系数（默认1.0）
         bundle_ratio: bundle -> ratio 映射字典
         bundle_map_file: click_id -> bundle 映射文件路径
+        click_id_bundle_map: 已加载到内存的 click_id -> bundle 映射
+        save_bundle_map_on_change: 映射格式迁移后是否由本函数写回文件
 
     Returns:
         统计信息字典
@@ -457,14 +657,11 @@ def apply_frequency_control(
             max_per_pixel_id
         )
 
-    # 加载 click_id -> bundle 映射
-    click_id_bundle_map = {}
-    if bundle_map_file:
-        try:
-            with open(bundle_map_file, 'r', encoding='utf-8') as f:
-                click_id_bundle_map = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+    # 加载 click_id -> bundle 映射，并兼容迁移旧格式
+    if click_id_bundle_map is None:
+        click_id_bundle_map, bundle_map_changed, _ = load_bundle_map(bundle_map_file)
+        if bundle_map_changed and save_bundle_map_on_change:
+            save_bundle_map(bundle_map_file, click_id_bundle_map)
 
     # 加载当天的pixel_id计数
     pixel_id_counts = load_daily_counts(state_file, target_date)
@@ -536,7 +733,7 @@ def apply_frequency_control(
     print(f"\n步骤2: 应用 bundle 差异化比例限制...")
     bundle_groups = defaultdict(list)
     for url, click_id in eligible_urls:
-        bundle = click_id_bundle_map.get(click_id) if click_id else None
+        bundle = get_bundle_from_map_entry(click_id_bundle_map.get(click_id)) if click_id else None
         bundle_groups[bundle].append((url, click_id))
 
     final_urls = []
@@ -1083,9 +1280,11 @@ def process_requests(
 class Orchestrator:
     """主编排器"""
 
-    def __init__(self, config_file: str = 'orchestrator_config.json'):
+    def __init__(self, config_file: str = 'orchestrator_config.json', bundle_map_retention_days: Optional[int] = None):
         """初始化"""
         self.config = self.load_config(config_file)
+        if bundle_map_retention_days is not None:
+            self.config['bundle_map_retention_days'] = bundle_map_retention_days
         self.state_file = self.config.get('state_file', 'orchestrator_state.json')
         self.bundle_map_file = self.config.get('bundle_map_file', 'click_id_bundle_map.json')
         self.logger = self.setup_logging()
@@ -1114,6 +1313,7 @@ class Orchestrator:
             'cnt_rate': 1.0,
             'sleep_seconds': 5,
             'bundle_ratio': {},
+            'bundle_map_retention_days': -1,
             'scripts_dir': os.path.dirname(os.path.abspath(__file__))
         }
 
@@ -1174,8 +1374,15 @@ class Orchestrator:
             self.logger.error(f"查找日志文件失败: {e}")
             raise
 
-    def run_extract_log(self, log_file: str, start_position: int) -> tuple:
-        """运行日志提取，返回 (end_position, extracted_url_count)"""
+    def run_extract_log(
+        self,
+        log_file: str,
+        start_position: int,
+        click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        bundle_map_changed: bool = False,
+        bundle_map_load_stats: Optional[Dict[str, int]] = None
+    ) -> tuple:
+        """运行日志提取，返回 (end_position, extracted_url_count, bundle_map_changed)"""
         self.logger.info("步骤 1: 提取日志数据")
 
         clicks_temp_file = self.config['clicks_temp_file']
@@ -1195,7 +1402,11 @@ class Orchestrator:
             clicks_temp_file,
             pixelid_token_cnt_file,
             start_position,
-            self.bundle_map_file
+            self.bundle_map_file,
+            click_id_bundle_map,
+            bundle_map_changed,
+            bundle_map_load_stats,
+            False
         )
 
         end_position, extracted_count = stats['end_position'], stats['matched_url_count']
@@ -1205,9 +1416,12 @@ class Orchestrator:
             self.logger.info(f"  去重率: {stats['duplicate_click_id_count']/stats['url_count']*100:.2f}%")
         if stats['url_after_dedup'] > 0:
             self.logger.info(f"  pixel_id覆盖率: {stats['matched_url_count']/stats['url_after_dedup']*100:.2f}%")
-        return (end_position, extracted_count)
+        return (end_position, extracted_count, bool(stats.get('bundle_map_changed')))
 
-    def run_frequency_control(self) -> int:
+    def run_frequency_control(
+        self,
+        click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> int:
         """运行频率控制（应用pixel_id每天x个的限制和总体比例限制），返回过滤后的URL数量"""
         self.logger.info("步骤 2: 应用频率控制和总体比例限制")
 
@@ -1234,7 +1448,9 @@ class Orchestrator:
             pixelid_token_cnt_file,
             cnt_rate,
             bundle_ratio,
-            self.bundle_map_file
+            self.bundle_map_file,
+            click_id_bundle_map,
+            False
         )
 
         for k, v in stats.items():
@@ -1315,6 +1531,29 @@ class Orchestrator:
         self.logger.info("="*80)
 
         try:
+            # 迁移 bundle map 格式；retention_days >= 0 时额外清理过期记录
+            retention_days = int(self.config.get('bundle_map_retention_days', -1))
+            click_id_bundle_map, bundle_map_dirty, bundle_map_load_stats = load_bundle_map(self.bundle_map_file, self.logger)
+            cleanup_stats = cleanup_loaded_bundle_map(click_id_bundle_map, retention_days, bundle_map_load_stats)
+            bundle_map_dirty = bundle_map_dirty or bool(cleanup_stats['changed'])
+            if cleanup_stats['cleanup_enabled']:
+                self.logger.info(
+                    "bundle map 清理完成: "
+                    f"加载={cleanup_stats['loaded']}, 迁移={cleanup_stats['migrated']}, "
+                    f"修复时间戳={cleanup_stats['timestamp_fixed']}, 删除={cleanup_stats['deleted']}, "
+                    f"保留={cleanup_stats['remaining']}, 保留天数={cleanup_stats['retention_days']}"
+                )
+            else:
+                self.logger.info(
+                    "bundle map 清理已跳过: "
+                    f"加载={cleanup_stats['loaded']}, 迁移={cleanup_stats['migrated']}, "
+                    f"修复时间戳={cleanup_stats['timestamp_fixed']}, 保留={cleanup_stats['remaining']}, "
+                    "retention_days=-1"
+                )
+            if bundle_map_dirty:
+                save_bundle_map(self.bundle_map_file, click_id_bundle_map, self.logger)
+                bundle_map_dirty = False
+
             # 步骤 0: 先执行上次 50% 概率产生的 PURCHASE curl（session_id 保持）
             pending_file = self.config.get('pending_curl_file', 'pending_curl.json')
             sleep_seconds = self.config.get('sleep_seconds', 5)
@@ -1344,10 +1583,19 @@ class Orchestrator:
             target_ratio = self.config.get('total_ratio', 0.04)
 
             # 步骤 1: 提取日志
-            end_position, extracted_count = self.run_extract_log(log_file, start_position)
+            end_position, extracted_count, bundle_map_dirty = self.run_extract_log(
+                log_file,
+                start_position,
+                click_id_bundle_map,
+                False,
+                {'migrated': 0, 'timestamp_fixed': 0, 'skipped_invalid': 0}
+            )
+            if bundle_map_dirty:
+                save_bundle_map(self.bundle_map_file, click_id_bundle_map, self.logger)
+                bundle_map_dirty = False
 
             # 步骤 2: 频率控制
-            filtered_count = self.run_frequency_control()
+            filtered_count = self.run_frequency_control(click_id_bundle_map)
 
             # 步骤 3: 执行请求
             success_count = self.run_convert()
@@ -1390,7 +1638,14 @@ class Orchestrator:
 def main():
     parser = argparse.ArgumentParser(description='统一编排脚本')
     parser.add_argument('--config', default='orchestrator_config.json', help='配置文件路径')
-    Orchestrator(parser.parse_args().config).run()
+    parser.add_argument(
+        '--bundle-map-retention-days',
+        type=int,
+        default=None,
+        help='click_id_bundle_map.json 保留天数，-1 表示不清理（覆盖配置文件）'
+    )
+    args = parser.parse_args()
+    Orchestrator(args.config, args.bundle_map_retention_days).run()
 
 
 if __name__ == '__main__':
