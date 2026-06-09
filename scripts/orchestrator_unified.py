@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List, Set, Tuple, Iterator
 from collections import defaultdict
 
 BLOCKED_DOMAINS = ('ad.ap4r.com', 's16.kwai.net', 'adx.opera.com', 'liftoff-creatives.io')
-VALUE_PROBS = [(20, 5), (50, 10), (70, 20), (80, 30), (90, 40), (95, 50), (100, 100)]
+VALUE_PROBS = [(5, 5), (45, 10), (60, 20), (74, 30), (83, 40), (90, 50), (95, 60), (98, 80), (100, 100)]
 
 # token=null 时的 POST 请求配置
 NULL_TOKEN_API_URL = 'https://ads.mythad.com/log/common'
