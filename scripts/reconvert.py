@@ -16,6 +16,7 @@ import sys
 import argparse
 import random
 import logging
+import os
 import time
 import shlex
 from datetime import datetime, timedelta
@@ -58,7 +59,23 @@ def parse_timestamp(timestamp_str: str) -> datetime:
         raise ValueError(f"无法解析时间戳 '{timestamp_str}': {e}")
 
 
-def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int = 0) -> List[Tuple[datetime, str]]:
+def get_default_archive_dir(log_file: str) -> str:
+    """根据当前日志文件路径推导默认归档目录"""
+    log_dir = os.path.dirname(log_file) or '.'
+    return os.path.join(log_dir, 'purchase_log')
+
+
+def get_log_file_for_day(log_file: str, archive_dir: str, days_ago: int) -> str:
+    """返回指定天数应读取的 purchase 日志文件"""
+    if days_ago == 0:
+        return log_file
+
+    target_date = datetime.now() - timedelta(days=days_ago)
+    archive_name = f"purchase_log.{target_date.strftime('%Y%m%d')}"
+    return os.path.join(archive_dir, archive_name)
+
+
+def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int = 0, missing_ok: bool = False) -> List[Tuple[datetime, str]]:
     """
     从日志文件中提取指定天数前的过去一小时内的 curl 命令
 
@@ -70,6 +87,7 @@ def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int =
         log_file: 日志文件路径
         logger: 日志对象
         days_ago: 几天前（0=今天，1=昨天，2=前天，3=大前天）
+        missing_ok: 文件不存在时是否跳过
 
     Returns:
         List of (timestamp, curl_command) tuples
@@ -80,6 +98,7 @@ def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int =
     # 目标时间点的前一小时
     one_hour_ago = target_time - timedelta(hours=1)
 
+    logger.info(f"  日志文件: {os.path.abspath(log_file)}")
     logger.info(f"  时间窗口: {one_hour_ago.strftime('%Y-%m-%d %H:%M:%S')} ~ {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     curl_commands = []
@@ -149,6 +168,9 @@ def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int =
             i += 1
     
     except FileNotFoundError:
+        if missing_ok:
+            logger.warning(f"日志文件不存在，跳过: {log_file}")
+            return []
         logger.error(f"日志文件不存在: {log_file}")
         sys.exit(1)
     except Exception as e:
@@ -260,6 +282,12 @@ def main():
         help='日志文件路径（默认: purchase.log，支持 PURCHASE 格式及 token_null POST）'
     )
     parser.add_argument(
+        '--archive-dir',
+        type=str,
+        default=None,
+        help='历史 purchase 日志归档目录（默认: --log-file 同级目录下的 purchase_log）'
+    )
+    parser.add_argument(
         '--rate',
         type=float,
         default=0.1,
@@ -295,6 +323,7 @@ def main():
             sys.exit(1)
 
     logger = setup_logging()
+    archive_dir = args.archive_dir or get_default_archive_dir(args.log_file)
 
     # 构建完整的配置列表：(days_ago, rate, label)
     day_configs = [(0, args.rate, '今天')]
@@ -303,7 +332,8 @@ def main():
 
     logger.info("=" * 80)
     logger.info(f"开始重新执行 curl 请求 - 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"日志文件: {args.log_file}")
+    logger.info(f"今天日志文件: {os.path.abspath(args.log_file)}")
+    logger.info(f"历史归档目录: {os.path.abspath(archive_dir)}")
     for days_ago, rate, label in day_configs:
         logger.info(f"  {label}执行比例: {rate * 100:.1f}%")
     logger.info("=" * 80)
@@ -327,8 +357,9 @@ def main():
         logger.info(f"{'=' * 80}")
 
         # 提取 curl 命令
+        log_file = get_log_file_for_day(args.log_file, archive_dir, days_ago)
         logger.info(f"正在提取{day_label}过去一小时内的 curl 命令...")
-        curl_commands = extract_curl_commands(args.log_file, logger, days_ago)
+        curl_commands = extract_curl_commands(log_file, logger, days_ago, missing_ok=(days_ago > 0))
 
         if not curl_commands:
             logger.info(f"未找到{day_label}过去一小时内的 curl 命令")
