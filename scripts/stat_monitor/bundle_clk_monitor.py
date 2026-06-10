@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import urllib.parse
 from collections import Counter
@@ -18,6 +19,8 @@ REQUEST_MARKER = "收到 kwaiadsinfo postshow 请求数据: "
 UNKNOWN_BUNDLE = "(unknown)"
 DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
+MAIL_ALERT_MINUTES = 30
+MAIL_ALERT_TO = "hanjing915@qq.com"
 
 
 def script_dir() -> str:
@@ -74,8 +77,8 @@ def load_json_file(path: str, default: Any) -> Any:
         return default
 
 
-def find_latest_log_file(log_dir: str, log_prefix: str) -> str:
-    """在日志目录中找到最新修改的、匹配前缀且以 .log 结尾的文件。"""
+def find_log_files(log_dir: str, log_prefix: str) -> List[str]:
+    """在日志目录中找到匹配前缀且以 .log 结尾的文件，按修改时间从新到旧排序。"""
     try:
         files = os.listdir(log_dir)
     except OSError as exc:
@@ -88,7 +91,12 @@ def find_latest_log_file(log_dir: str, log_prefix: str) -> str:
     ]
     if not log_files:
         raise RuntimeError(f"no log files found in {log_dir} with prefix {log_prefix}")
-    return max(log_files, key=os.path.getmtime)
+    return sorted(log_files, key=os.path.getmtime, reverse=True)
+
+
+def find_latest_log_file(log_dir: str, log_prefix: str) -> str:
+    """在日志目录中找到最新修改的、匹配前缀且以 .log 结尾的文件。"""
+    return find_log_files(log_dir, log_prefix)[0]
 
 
 def extract_request_body(log_line: str) -> Optional[str]:
@@ -204,8 +212,27 @@ def find_last_log_time(log_file: str) -> Optional[Tuple[float, str]]:
     return latest_log_time
 
 
+def find_latest_parsed_log_time(log_files: List[str]) -> Optional[Tuple[str, float, str]]:
+    """按文件修改时间从新到旧查找最近一条可解析日志时间。"""
+    for log_file in log_files:
+        latest_log_time = find_last_log_time(log_file)
+        if latest_log_time:
+            return log_file, latest_log_time[0], latest_log_time[1]
+    return None
+
+
+def find_window_log_files(log_files: List[str], window_start_time: float, latest_log_file: str) -> List[str]:
+    """选择可能覆盖统计窗口的日志文件，并按修改时间从旧到新排序。"""
+    selected = [
+        log_file
+        for log_file in log_files
+        if log_file == latest_log_file or os.path.getmtime(log_file) >= window_start_time
+    ]
+    return sorted(selected, key=os.path.getmtime)
+
+
 def scan_window_clicks(
-    log_file: str,
+    log_files: List[str],
     window_start_time: float,
     window_end_time: float,
     bundle_map: Dict[str, str],
@@ -234,75 +261,76 @@ def scan_window_clicks(
     last_referrer_package = None
     lines_since_referrer = 0
 
-    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            parsed_log_time = parse_log_time(line)
-            if not parsed_log_time:
-                continue
-
-            log_time, log_time_display = parsed_log_time
-            if log_time > window_end_time:
-                continue
-
-            # 窗口前的 postshow 也要解析，用来延续 referrer_package 上下文；
-            # 只有窗口内的 URL 才会进入最终统计。
-            in_window = log_time >= window_start_time
-            if in_window:
-                stats["scanned_lines"] += 1
-                if earliest_log_time is None or log_time < earliest_log_time[0]:
-                    earliest_log_time = (log_time, log_time_display)
-                if latest_log_time is None or log_time > latest_log_time[0]:
-                    latest_log_time = (log_time, log_time_display)
-
-            request_body = extract_request_body(line)
-            if request_body is None:
-                continue
-
-            stats["postshow_lines"] += 1
-            json_data = parse_json_data(request_body)
-            if json_data is None:
-                continue
-
-            referrer_package = extract_referrer_package(json_data)
-            if referrer_package:
-                last_referrer_package = referrer_package
-                lines_since_referrer = 0
-            else:
-                lines_since_referrer += 1
-                if last_referrer_package and lines_since_referrer <= 10:
-                    referrer_package = last_referrer_package
-
-            if not in_window:
-                continue
-
-            for raw_url in extract_urls_from_data(json_data):
-                url = raw_url.strip().rstrip('"')
-                if "click_id" not in url or "pixel_id" not in url:
-                    continue
-                if any(domain in url for domain in BLOCKED_DOMAINS):
-                    stats["blocked_urls"] += 1
+    for log_file in log_files:
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parsed_log_time = parse_log_time(line)
+                if not parsed_log_time:
                     continue
 
-                stats["candidate_urls"] += 1
-                _, click_id = parse_url_pixel_id(url)
-                if not click_id:
-                    continue
-                # 同一次扫描内，同一个 click_id 只计一次，保持与 orchestrator 的去重口径一致。
-                if click_id in seen_click_ids:
-                    stats["duplicate_click_ids"] += 1
+                log_time, log_time_display = parsed_log_time
+                if log_time > window_end_time:
                     continue
 
-                seen_click_ids.add(click_id)
-                bundle = bundle_map.get(click_id) or referrer_package or UNKNOWN_BUNDLE
-                events.append(
-                    {
-                        "log_time": log_time,
-                        "log_time_display": log_time_display,
-                        "bundle": bundle,
-                        "click_id": click_id,
-                    }
-                )
-                stats["valid_clicks"] += 1
+                # 窗口前的 postshow 也要解析，用来延续 referrer_package 上下文；
+                # 只有窗口内的 URL 才会进入最终统计。
+                in_window = log_time >= window_start_time
+                if in_window:
+                    stats["scanned_lines"] += 1
+                    if earliest_log_time is None or log_time < earliest_log_time[0]:
+                        earliest_log_time = (log_time, log_time_display)
+                    if latest_log_time is None or log_time > latest_log_time[0]:
+                        latest_log_time = (log_time, log_time_display)
+
+                request_body = extract_request_body(line)
+                if request_body is None:
+                    continue
+
+                stats["postshow_lines"] += 1
+                json_data = parse_json_data(request_body)
+                if json_data is None:
+                    continue
+
+                referrer_package = extract_referrer_package(json_data)
+                if referrer_package:
+                    last_referrer_package = referrer_package
+                    lines_since_referrer = 0
+                else:
+                    lines_since_referrer += 1
+                    if last_referrer_package and lines_since_referrer <= 10:
+                        referrer_package = last_referrer_package
+
+                if not in_window:
+                    continue
+
+                for raw_url in extract_urls_from_data(json_data):
+                    url = raw_url.strip().rstrip('"')
+                    if "click_id" not in url or "pixel_id" not in url:
+                        continue
+                    if any(domain in url for domain in BLOCKED_DOMAINS):
+                        stats["blocked_urls"] += 1
+                        continue
+
+                    stats["candidate_urls"] += 1
+                    _, click_id = parse_url_pixel_id(url)
+                    if not click_id:
+                        continue
+                    # 同一次扫描内，同一个 click_id 只计一次，保持与 orchestrator 的去重口径一致。
+                    if click_id in seen_click_ids:
+                        stats["duplicate_click_ids"] += 1
+                        continue
+
+                    seen_click_ids.add(click_id)
+                    bundle = bundle_map.get(click_id) or referrer_package or UNKNOWN_BUNDLE
+                    events.append(
+                        {
+                            "log_time": log_time,
+                            "log_time_display": log_time_display,
+                            "bundle": bundle,
+                            "click_id": click_id,
+                        }
+                    )
+                    stats["valid_clicks"] += 1
 
     if earliest_log_time:
         stats["actual_scanned_log_time_start"] = earliest_log_time[1]
@@ -391,6 +419,69 @@ def write_output_file(output_dir: str, output_text: str, run_dt: datetime) -> st
     return output_file
 
 
+def get_machine_ip() -> str:
+    """获取报警邮件里展示的机器 IP，可用 CLK_MONITOR_MACHINE_IP 覆盖。"""
+    env_ip = os.environ.get("CLK_MONITOR_MACHINE_IP")
+    if env_ip:
+        return env_ip
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "unknown"
+
+
+def maybe_send_zero_clicks_alert(
+    minutes: int,
+    total_clicks: int,
+    latest_log_file: str,
+    scanned_range: str,
+    output_file: str,
+) -> Optional[str]:
+    """满足 30 分钟以上且零点击时，通过 send_mail.py 发送报警邮件。"""
+    if minutes < MAIL_ALERT_MINUTES or total_clicks != 0:
+        return None
+
+    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
+    if send_mail_dir not in sys.path:
+        sys.path.insert(0, send_mail_dir)
+
+    try:
+        from send_mail import send_mail
+    except Exception as exc:
+        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    machine_ip = get_machine_ip()
+    subject = f"[clk_monitor] {machine_ip} {minutes} minutes zero clicks alert"
+    content = "\n".join(
+        [
+            f"！机器{machine_ip}已经{minutes}分钟没有点击了！",
+            f"machine_ip: {machine_ip}",
+            f"minutes: {minutes}",
+            f"total_clicks: {total_clicks}",
+            f"log_file: {latest_log_file}",
+            f"scanned_log_time_range: {scanned_range}",
+            f"output_file: {output_file}",
+        ]
+    )
+    result = send_mail(subject, content, MAIL_ALERT_TO)
+    if result != "sent":
+        print(f"warning: zero clicks alert mail result: {result}", file=sys.stderr)
+    return result
+
+
 def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: datetime) -> int:
     """清理 output_dir 中超过保留天数的 clk_stat.* 产物，返回删除数量。"""
     cutoff_ts = (now_dt - timedelta(days=retention_days)).timestamp()
@@ -457,11 +548,12 @@ def main() -> int:
         log_dir = resolve_output_path(log_dir, config_dir)
 
     bundle_map_file = resolve_output_path(config.get("bundle_map_file", "click_id_bundle_map.json"), config_dir)
-    latest_log_file = find_latest_log_file(log_dir, log_prefix)
+    log_files = find_log_files(log_dir, log_prefix)
+    latest_log_file = log_files[0]
     window_seconds = args.min * 60
 
     bundle_map = load_bundle_map(bundle_map_file)
-    latest_log_time = find_last_log_time(latest_log_file)
+    latest_log_time = find_latest_parsed_log_time(log_files)
     if not latest_log_time:
         output_text = build_output_text(
             latest_log_file,
@@ -475,13 +567,23 @@ def main() -> int:
         print(f"output_file: {output_file}")
         deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
         print(f"cleanup_deleted: {deleted}")
+        alert_result = maybe_send_zero_clicks_alert(
+            args.min,
+            0,
+            latest_log_file,
+            "N/A",
+            output_file,
+        )
+        if alert_result:
+            print(f"alert_mail: {alert_result}")
         return 0
 
-    window_end_time = latest_log_time[0]
+    latest_log_file, window_end_time, _ = latest_log_time
     window_start_time = window_end_time - window_seconds
+    window_log_files = find_window_log_files(log_files, window_start_time, latest_log_file)
 
     window_events, stats = scan_window_clicks(
-        latest_log_file,
+        window_log_files,
         window_start_time,
         window_end_time,
         bundle_map,
@@ -504,6 +606,15 @@ def main() -> int:
     print(f"output_file: {output_file}")
     deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
     print(f"cleanup_deleted: {deleted}")
+    alert_result = maybe_send_zero_clicks_alert(
+        args.min,
+        len(window_events),
+        latest_log_file,
+        scanned_range,
+        output_file,
+    )
+    if alert_result:
+        print(f"alert_mail: {alert_result}")
     return 0
 
 
