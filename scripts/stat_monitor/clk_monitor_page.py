@@ -23,7 +23,7 @@ import os
 import posixpath
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -57,6 +57,14 @@ class ParsedStatFile:
     warnings: List[str] = field(default_factory=list)
 
 
+@dataclass
+class TotalClickPoint:
+    path: str
+    name: str
+    stat_time: datetime
+    total: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve a simple clk_stat diff monitor page.")
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="directory containing clk_stat files")
@@ -73,14 +81,38 @@ def is_candidate_file(name: str, path: str) -> bool:
     return lower_name.endswith(ALLOWED_SUFFIXES) or lower_name.startswith("clk_stat.")
 
 
-def latest_two_files(data_dir: str) -> List[str]:
-    entries: List[Tuple[float, str]] = []
+def stat_time_from_name(name: str) -> Optional[datetime]:
+    if not name.startswith("clk_stat."):
+        return None
+
+    stamp = name[len("clk_stat.") :]
+    digits = "".join(ch for ch in stamp if ch.isdigit())
+    if len(digits) < 12:
+        return None
+
+    try:
+        return datetime.strptime(digits[:12], "%Y%m%d%H%M")
+    except ValueError:
+        return None
+
+
+def stat_time_for_path(path: str) -> datetime:
+    return stat_time_from_name(os.path.basename(path)) or datetime.fromtimestamp(os.path.getmtime(path))
+
+
+def candidate_files(data_dir: str) -> List[Tuple[datetime, float, str]]:
+    entries: List[Tuple[datetime, float, str]] = []
     for name in os.listdir(data_dir):
         path = os.path.join(data_dir, name)
         if is_candidate_file(name, path):
-            entries.append((os.path.getmtime(path), path))
-    entries.sort(key=lambda item: item[0], reverse=True)
-    return [path for _, path in entries[:2]]
+            entries.append((stat_time_for_path(path), os.path.getmtime(path), path))
+    return entries
+
+
+def latest_two_files(data_dir: str) -> List[str]:
+    entries = candidate_files(data_dir)
+    entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [path for _, _, path in entries[:2]]
 
 
 def read_text(path: str) -> str:
@@ -246,6 +278,39 @@ def total_click_cell(rows: Dict[str, ClickCell]) -> ClickCell:
     return ClickCell(present=True, value=total, raw=str(total))
 
 
+def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClickPoint], List[str]]:
+    entries = [entry for entry in candidate_files(data_dir) if os.path.basename(entry[2]).startswith("clk_stat.")]
+    if not entries:
+        return [], []
+
+    entries.sort(key=lambda item: (item[0], item[1]))
+    newest_time = entries[-1][0]
+    cutoff_time = newest_time - timedelta(hours=hours)
+    points: List[TotalClickPoint] = []
+    errors: List[str] = []
+
+    for stat_time, _, path in entries:
+        if stat_time < cutoff_time or stat_time > newest_time:
+            continue
+        try:
+            parsed = parse_stat_file(path)
+        except Exception as exc:
+            errors.append(f"{os.path.basename(path)}: {exc}")
+            continue
+
+        total = total_click_cell(parsed.rows).value or 0.0
+        points.append(
+            TotalClickPoint(
+                path=path,
+                name=os.path.basename(path),
+                stat_time=stat_time,
+                total=total,
+            )
+        )
+
+    return points, errors
+
+
 def build_table_rows(file1: ParsedStatFile, file2: ParsedStatFile) -> List[Tuple[str, ClickCell, ClickCell, str]]:
     bundles = sorted(set(file1.rows) | set(file2.rows))
     rows: List[Tuple[str, ClickCell, ClickCell, str]] = []
@@ -352,6 +417,83 @@ def html_page(title: str, body: str, refresh: int) -> bytes:
     .error {{
       color: var(--error);
     }}
+    .chart {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-bottom: 16px;
+      padding: 14px 16px 16px;
+    }}
+    .chart-head {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }}
+    .chart-title {{
+      font-size: 16px;
+      font-weight: 650;
+    }}
+    .chart svg {{
+      display: block;
+      width: 100%;
+      height: auto;
+    }}
+    .chart-grid {{
+      stroke: var(--line);
+      stroke-width: 1;
+      opacity: 0.75;
+    }}
+    .chart-axis {{
+      stroke: var(--line);
+      stroke-width: 1;
+    }}
+    .chart-line {{
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }}
+    .chart-dot {{
+      fill: var(--panel);
+      stroke: var(--accent);
+      stroke-width: 2;
+    }}
+    .chart-hover-area {{
+      fill: transparent;
+      pointer-events: all;
+    }}
+    .chart-hover-guide,
+    .chart-tooltip {{
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 120ms ease;
+    }}
+    .chart-hover-target:hover .chart-hover-guide,
+    .chart-hover-target:hover .chart-tooltip {{
+      opacity: 1;
+    }}
+    .chart-hover-guide {{
+      stroke: var(--accent);
+      stroke-width: 1.5;
+      stroke-dasharray: 4 4;
+    }}
+    .chart-tooltip-box {{
+      fill: var(--panel);
+      stroke: var(--line);
+      stroke-width: 1;
+    }}
+    .chart-tooltip-text {{
+      fill: var(--fg);
+      font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .chart-label {{
+      fill: var(--muted);
+      font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -444,6 +586,121 @@ def render_warnings(files: Iterable[ParsedStatFile]) -> str:
     return f'<section class="error"><strong>数据警告</strong><ul>{"".join(items)}</ul></section>'
 
 
+def render_total_history_chart(points: List[TotalClickPoint], errors: List[str]) -> str:
+    error_items = "".join(f"<li>{html.escape(error)}</li>" for error in errors[:10])
+    error_html = f'<div class="muted"><ul>{error_items}</ul></div>' if error_items else ""
+    if not points:
+        return f"""
+<section class="chart">
+  <div class="chart-head">
+    <div class="chart-title">过去24小时点击总数</div>
+    <div class="muted">暂无可展示数据</div>
+  </div>
+  {error_html}
+</section>
+"""
+
+    width = 960
+    height = 280
+    left = 58
+    right = 18
+    top = 18
+    bottom = 42
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    max_total = max(point.total for point in points)
+    y_max = max(max_total, 1.0)
+
+    def point_x(index: int) -> float:
+        if len(points) == 1:
+            return left + plot_width / 2
+        return left + plot_width * index / (len(points) - 1)
+
+    def point_y(total: float) -> float:
+        return top + plot_height - (total / y_max * plot_height)
+
+    chart_points = [(point_x(index), point_y(point.total), point) for index, point in enumerate(points)]
+    polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in chart_points)
+    grid_values = [0.0, y_max / 2, y_max]
+    grid_lines = []
+    for value in grid_values:
+        y = point_y(value)
+        grid_lines.append(
+            f'<line class="chart-grid" x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" />'
+            f'<text class="chart-label" x="{left - 10}" y="{y + 4:.1f}" text-anchor="end">{html.escape(format_number(value))}</text>'
+        )
+
+    dots = []
+    for x, y, point in chart_points:
+        label = f"{point.stat_time.strftime('%m-%d %H:%M')} / {format_number(point.total)}"
+        dots.append(
+            f'<circle class="chart-dot" cx="{x:.1f}" cy="{y:.1f}" r="3.5">'
+            f"<title>{html.escape(label)}</title>"
+            "</circle>"
+        )
+
+    hover_targets = []
+    tooltip_height = 44
+    for index, (x, y, point) in enumerate(chart_points):
+        if len(chart_points) == 1:
+            band_x = left
+            band_width = plot_width
+        else:
+            prev_x = chart_points[index - 1][0] if index > 0 else left
+            next_x = chart_points[index + 1][0] if index < len(chart_points) - 1 else width - right
+            band_x = (prev_x + x) / 2 if index > 0 else left
+            band_width = ((x + next_x) / 2 if index < len(chart_points) - 1 else width - right) - band_x
+
+        time_text = point.stat_time.strftime("%m-%d %H:%M")
+        total_text = f"total {format_number(point.total)}"
+        tooltip_width = max(132, min(220, (max(len(time_text), len(total_text)) * 7) + 28))
+        tooltip_x = x + 12
+        if tooltip_x + tooltip_width > width - right:
+            tooltip_x = x - tooltip_width - 12
+        tooltip_x = max(left, tooltip_x)
+        tooltip_y = y - tooltip_height - 12
+        if tooltip_y < top:
+            tooltip_y = y + 12
+        if tooltip_y + tooltip_height > height - bottom:
+            tooltip_y = height - bottom - tooltip_height
+
+        hover_targets.append(
+            '<g class="chart-hover-target">'
+            f'<rect class="chart-hover-area" x="{band_x:.1f}" y="{top}" width="{band_width:.1f}" height="{plot_height}" />'
+            f'<line class="chart-hover-guide" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{height - bottom}" />'
+            '<g class="chart-tooltip">'
+            f'<rect class="chart-tooltip-box" x="{tooltip_x:.1f}" y="{tooltip_y:.1f}" width="{tooltip_width:.1f}" height="{tooltip_height}" rx="6" />'
+            f'<text class="chart-tooltip-text" x="{tooltip_x + 10:.1f}" y="{tooltip_y + 17:.1f}">{html.escape(time_text)}</text>'
+            f'<text class="chart-tooltip-text" x="{tooltip_x + 10:.1f}" y="{tooltip_y + 34:.1f}">{html.escape(total_text)}</text>'
+            "</g>"
+            "</g>"
+        )
+
+    start_label = points[0].stat_time.strftime("%m-%d %H:%M")
+    end_label = points[-1].stat_time.strftime("%m-%d %H:%M")
+    latest_total = format_number(points[-1].total)
+    range_label = f"{start_label} -> {end_label} / {len(points)} points / latest {latest_total}"
+
+    return f"""
+<section class="chart">
+  <div class="chart-head">
+    <div class="chart-title">过去24小时点击总数</div>
+    <div class="muted">{html.escape(range_label)}</div>
+  </div>
+  <svg viewBox="0 0 {width} {height}" role="img" aria-label="过去24小时点击总数折线图">
+    {''.join(grid_lines)}
+    <line class="chart-axis" x1="{left}" y1="{height - bottom}" x2="{width - right}" y2="{height - bottom}" />
+    <polyline class="chart-line" points="{polyline}" />
+    {''.join(dots)}
+    {''.join(hover_targets)}
+    <text class="chart-label" x="{left}" y="{height - 14}">{html.escape(start_label)}</text>
+    <text class="chart-label" x="{width - right}" y="{height - 14}" text-anchor="end">{html.escape(end_label)}</text>
+  </svg>
+  {error_html}
+</section>
+"""
+
+
 def render_table(file1: ParsedStatFile, file2: ParsedStatFile) -> str:
     body_rows = []
     for bundle, cell1, cell2, diff in build_table_rows(file1, file2):
@@ -517,7 +774,13 @@ def render_monitor(data_dir: str, refresh: int) -> bytes:
         )
         return html_page("clk monitor", body, refresh)
 
-    body = render_meta(file1, file2, refresh) + render_warnings((file1, file2)) + render_table(file1, file2)
+    history_points, history_errors = build_total_history(data_dir)
+    body = (
+        render_meta(file1, file2, refresh)
+        + render_warnings((file1, file2))
+        + render_total_history_chart(history_points, history_errors)
+        + render_table(file1, file2)
+    )
     return html_page("clk monitor", body, refresh)
 
 
