@@ -21,6 +21,7 @@ DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
 MAIL_ALERT_MINUTES = 30
 MAIL_ALERT_TO = "hanjing915@qq.com"
+CLICK_DROP_ALERT_THRESHOLD = 0.10
 
 
 def script_dir() -> str:
@@ -419,6 +420,32 @@ def write_output_file(output_dir: str, output_text: str, run_dt: datetime) -> st
     return output_file
 
 
+def get_clk_stat_file_path(output_dir: str, run_dt: datetime) -> str:
+    """按运行时间拼出对应的 clk_stat 文件路径。"""
+    return os.path.join(output_dir, f"clk_stat.{run_dt.strftime('%Y%m%d-%H%M')}")
+
+
+def read_total_clicks_from_clk_stat(path: str) -> Optional[int]:
+    """读取 clk_stat 文件里的 total_clicks；追加写入时取最后一次结果。"""
+    totals = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                match = re.match(r"^\s*total_clicks:\s*(\d+)\s*$", line)
+                if match:
+                    totals.append(int(match.group(1)))
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"warning: cannot read yesterday clk_stat {path}: {exc}", file=sys.stderr)
+        return None
+
+    if not totals:
+        print(f"warning: cannot find total_clicks in yesterday clk_stat: {path}", file=sys.stderr)
+        return None
+    return totals[-1]
+
+
 def get_machine_ip() -> str:
     """获取报警邮件里展示的机器 IP，可用 CLK_MONITOR_MACHINE_IP 覆盖。"""
     env_ip = os.environ.get("CLK_MONITOR_MACHINE_IP")
@@ -479,6 +506,65 @@ def maybe_send_zero_clicks_alert(
     result = send_mail(subject, content, MAIL_ALERT_TO)
     if result != "sent":
         print(f"warning: zero clicks alert mail result: {result}", file=sys.stderr)
+    return result
+
+
+def maybe_send_click_drop_alert(
+    output_dir: str,
+    run_dt: datetime,
+    total_clicks: int,
+    latest_log_file: str,
+    scanned_range: str,
+    output_file: str,
+) -> Optional[str]:
+    """对比昨天同时间总点击，下降超过阈值时发送报警邮件。"""
+    yesterday_dt = run_dt - timedelta(days=1)
+    yesterday_file = get_clk_stat_file_path(output_dir, yesterday_dt)
+    yesterday_total_clicks = read_total_clicks_from_clk_stat(yesterday_file)
+    if yesterday_total_clicks is None:
+        print(f"info: no yesterday clk_stat data for same time: {yesterday_file}; skip click drop alert")
+        return None
+    if yesterday_total_clicks <= 0:
+        print(
+            f"info: yesterday total_clicks is {yesterday_total_clicks} for {yesterday_file}; skip click drop alert"
+        )
+        return None
+
+    drop_ratio = (yesterday_total_clicks - total_clicks) / yesterday_total_clicks
+    if drop_ratio <= CLICK_DROP_ALERT_THRESHOLD:
+        return None
+
+    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
+    if send_mail_dir not in sys.path:
+        sys.path.insert(0, send_mail_dir)
+
+    try:
+        from send_mail import send_mail
+    except Exception as exc:
+        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    machine_ip = get_machine_ip()
+    drop_percent = drop_ratio * 100
+    subject = f"[clk_monitor] {machine_ip} clicks dropped {drop_percent:.1f}% alert"
+    content = "\n".join(
+        [
+            f"！机器{machine_ip}当次点击较昨天同时间下降超过{CLICK_DROP_ALERT_THRESHOLD:.0%}！",
+            f"machine_ip: {machine_ip}",
+            f"current_time: {run_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"yesterday_same_time: {yesterday_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"current_total_clicks: {total_clicks}",
+            f"yesterday_total_clicks: {yesterday_total_clicks}",
+            f"drop_percent: {drop_percent:.2f}%",
+            f"log_file: {latest_log_file}",
+            f"scanned_log_time_range: {scanned_range}",
+            f"output_file: {output_file}",
+            f"yesterday_output_file: {yesterday_file}",
+        ]
+    )
+    result = send_mail(subject, content, MAIL_ALERT_TO)
+    if result != "sent":
+        print(f"warning: click drop alert mail result: {result}", file=sys.stderr)
     return result
 
 
@@ -565,6 +651,16 @@ def main() -> int:
         print(output_text)
         output_file = write_output_file(args.output_dir, output_text, run_dt)
         print(f"output_file: {output_file}")
+        drop_alert_result = maybe_send_click_drop_alert(
+            args.output_dir,
+            run_dt,
+            0,
+            latest_log_file,
+            "N/A",
+            output_file,
+        )
+        if drop_alert_result:
+            print(f"click_drop_alert_mail: {drop_alert_result}")
         deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
         print(f"cleanup_deleted: {deleted}")
         alert_result = maybe_send_zero_clicks_alert(
@@ -604,6 +700,16 @@ def main() -> int:
     print(output_text)
     output_file = write_output_file(args.output_dir, output_text, run_dt)
     print(f"output_file: {output_file}")
+    drop_alert_result = maybe_send_click_drop_alert(
+        args.output_dir,
+        run_dt,
+        len(window_events),
+        latest_log_file,
+        scanned_range,
+        output_file,
+    )
+    if drop_alert_result:
+        print(f"click_drop_alert_mail: {drop_alert_result}")
     deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
     print(f"cleanup_deleted: {deleted}")
     alert_result = maybe_send_zero_clicks_alert(

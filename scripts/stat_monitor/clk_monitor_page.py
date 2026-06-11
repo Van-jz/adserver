@@ -278,19 +278,22 @@ def total_click_cell(rows: Dict[str, ClickCell]) -> ClickCell:
     return ClickCell(present=True, value=total, raw=str(total))
 
 
-def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClickPoint], List[str]]:
+def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClickPoint], List[float], List[str]]:
     entries = [entry for entry in candidate_files(data_dir) if os.path.basename(entry[2]).startswith("clk_stat.")]
     if not entries:
-        return [], []
+        return [], [], []
 
     entries.sort(key=lambda item: (item[0], item[1]))
     newest_time = entries[-1][0]
     cutoff_time = newest_time - timedelta(hours=hours)
+    comparison_cutoff_time = cutoff_time - timedelta(days=1)
+    totals_by_time: Dict[datetime, float] = {}
     points: List[TotalClickPoint] = []
+    yesterday_totals: List[float] = []
     errors: List[str] = []
 
     for stat_time, _, path in entries:
-        if stat_time < cutoff_time or stat_time > newest_time:
+        if stat_time < comparison_cutoff_time or stat_time > newest_time:
             continue
         try:
             parsed = parse_stat_file(path)
@@ -298,7 +301,15 @@ def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClick
             errors.append(f"{os.path.basename(path)}: {exc}")
             continue
 
-        total = total_click_cell(parsed.rows).value or 0.0
+        totals_by_time[stat_time] = total_click_cell(parsed.rows).value or 0.0
+
+    for stat_time, _, path in entries:
+        if stat_time < cutoff_time or stat_time > newest_time:
+            continue
+        if stat_time not in totals_by_time:
+            continue
+
+        total = totals_by_time[stat_time]
         points.append(
             TotalClickPoint(
                 path=path,
@@ -307,8 +318,9 @@ def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClick
                 total=total,
             )
         )
+        yesterday_totals.append(totals_by_time.get(stat_time - timedelta(days=1), 0.0))
 
-    return points, errors
+    return points, yesterday_totals, errors
 
 
 def build_table_rows(file1: ParsedStatFile, file2: ParsedStatFile) -> List[Tuple[str, ClickCell, ClickCell, str]]:
@@ -349,6 +361,7 @@ def html_page(title: str, body: str, refresh: int) -> bytes:
       --panel: #ffffff;
       --error: #b42318;
       --accent: #1769aa;
+      --compare: #b45309;
     }}
     @media (prefers-color-scheme: dark) {{
       :root {{
@@ -359,6 +372,7 @@ def html_page(title: str, body: str, refresh: int) -> bytes:
         --panel: #1f2937;
         --error: #f97066;
         --accent: #7dd3fc;
+        --compare: #fbbf24;
       }}
     }}
     body {{
@@ -457,10 +471,37 @@ def html_page(title: str, body: str, refresh: int) -> bytes:
       stroke-linecap: round;
       stroke-linejoin: round;
     }}
+    .chart-line-yesterday {{
+      stroke: var(--compare);
+      opacity: 0.85;
+    }}
     .chart-dot {{
       fill: var(--panel);
       stroke: var(--accent);
       stroke-width: 2;
+    }}
+    .chart-dot-yesterday {{
+      stroke: var(--compare);
+    }}
+    .chart-legend {{
+      display: inline-flex;
+      gap: 12px;
+      align-items: center;
+      margin-left: 12px;
+    }}
+    .chart-legend-item {{
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+    }}
+    .chart-legend-swatch {{
+      width: 18px;
+      height: 3px;
+      border-radius: 999px;
+      background: var(--accent);
+    }}
+    .chart-legend-swatch-yesterday {{
+      background: var(--compare);
     }}
     .chart-hover-area {{
       fill: transparent;
@@ -586,7 +627,7 @@ def render_warnings(files: Iterable[ParsedStatFile]) -> str:
     return f'<section class="error"><strong>数据警告</strong><ul>{"".join(items)}</ul></section>'
 
 
-def render_total_history_chart(points: List[TotalClickPoint], errors: List[str]) -> str:
+def render_total_history_chart(points: List[TotalClickPoint], yesterday_totals: List[float], errors: List[str]) -> str:
     error_items = "".join(f"<li>{html.escape(error)}</li>" for error in errors[:10])
     error_html = f'<div class="muted"><ul>{error_items}</ul></div>' if error_items else ""
     if not points:
@@ -608,7 +649,7 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
     bottom = 42
     plot_width = width - left - right
     plot_height = height - top - bottom
-    max_total = max(point.total for point in points)
+    max_total = max([point.total for point in points] + yesterday_totals)
     y_max = max(max_total, 1.0)
 
     def point_x(index: int) -> float:
@@ -621,6 +662,8 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
 
     chart_points = [(point_x(index), point_y(point.total), point) for index, point in enumerate(points)]
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in chart_points)
+    yesterday_points = [(point_x(index), point_y(total), total) for index, total in enumerate(yesterday_totals)]
+    yesterday_polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in yesterday_points)
     grid_values = [0.0, y_max / 2, y_max]
     grid_lines = []
     for value in grid_values:
@@ -639,8 +682,14 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
             "</circle>"
         )
 
+    yesterday_dots = []
+    for x, y, total in yesterday_points:
+        yesterday_dots.append(
+            f'<circle class="chart-dot chart-dot-yesterday" cx="{x:.1f}" cy="{y:.1f}" r="3" />'
+        )
+
     hover_targets = []
-    tooltip_height = 44
+    tooltip_height = 62
     for index, (x, y, point) in enumerate(chart_points):
         if len(chart_points) == 1:
             band_x = left
@@ -652,8 +701,9 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
             band_width = ((x + next_x) / 2 if index < len(chart_points) - 1 else width - right) - band_x
 
         time_text = point.stat_time.strftime("%m-%d %H:%M")
-        total_text = f"total {format_number(point.total)}"
-        tooltip_width = max(132, min(220, (max(len(time_text), len(total_text)) * 7) + 28))
+        total_text = f"today {format_number(point.total)}"
+        yesterday_text = f"yesterday {format_number(yesterday_totals[index])}"
+        tooltip_width = max(156, min(240, (max(len(time_text), len(total_text), len(yesterday_text)) * 7) + 28))
         tooltip_x = x + 12
         if tooltip_x + tooltip_width > width - right:
             tooltip_x = x - tooltip_width - 12
@@ -672,6 +722,7 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
             f'<rect class="chart-tooltip-box" x="{tooltip_x:.1f}" y="{tooltip_y:.1f}" width="{tooltip_width:.1f}" height="{tooltip_height}" rx="6" />'
             f'<text class="chart-tooltip-text" x="{tooltip_x + 10:.1f}" y="{tooltip_y + 17:.1f}">{html.escape(time_text)}</text>'
             f'<text class="chart-tooltip-text" x="{tooltip_x + 10:.1f}" y="{tooltip_y + 34:.1f}">{html.escape(total_text)}</text>'
+            f'<text class="chart-tooltip-text" x="{tooltip_x + 10:.1f}" y="{tooltip_y + 51:.1f}">{html.escape(yesterday_text)}</text>'
             "</g>"
             "</g>"
         )
@@ -679,18 +730,26 @@ def render_total_history_chart(points: List[TotalClickPoint], errors: List[str])
     start_label = points[0].stat_time.strftime("%m-%d %H:%M")
     end_label = points[-1].stat_time.strftime("%m-%d %H:%M")
     latest_total = format_number(points[-1].total)
-    range_label = f"{start_label} -> {end_label} / {len(points)} points / latest {latest_total}"
+    latest_yesterday_total = format_number(yesterday_totals[-1]) if yesterday_totals else "0"
+    range_label = f"{start_label} -> {end_label} / {len(points)} points / latest {latest_total} / yesterday {latest_yesterday_total}"
 
     return f"""
 <section class="chart">
   <div class="chart-head">
-    <div class="chart-title">过去24小时点击总数</div>
+    <div class="chart-title">过去24小时点击总数
+      <span class="chart-legend">
+        <span class="chart-legend-item"><span class="chart-legend-swatch"></span>当前</span>
+        <span class="chart-legend-item"><span class="chart-legend-swatch chart-legend-swatch-yesterday"></span>昨日同期</span>
+      </span>
+    </div>
     <div class="muted">{html.escape(range_label)}</div>
   </div>
   <svg viewBox="0 0 {width} {height}" role="img" aria-label="过去24小时点击总数折线图">
     {''.join(grid_lines)}
     <line class="chart-axis" x1="{left}" y1="{height - bottom}" x2="{width - right}" y2="{height - bottom}" />
+    <polyline class="chart-line chart-line-yesterday" points="{yesterday_polyline}" />
     <polyline class="chart-line" points="{polyline}" />
+    {''.join(yesterday_dots)}
     {''.join(dots)}
     {''.join(hover_targets)}
     <text class="chart-label" x="{left}" y="{height - 14}">{html.escape(start_label)}</text>
@@ -774,11 +833,11 @@ def render_monitor(data_dir: str, refresh: int) -> bytes:
         )
         return html_page("clk monitor", body, refresh)
 
-    history_points, history_errors = build_total_history(data_dir)
+    history_points, yesterday_totals, history_errors = build_total_history(data_dir)
     body = (
-        render_meta(file1, file2, refresh)
+        render_total_history_chart(history_points, yesterday_totals, history_errors)
+        + render_meta(file1, file2, refresh)
         + render_warnings((file1, file2))
-        + render_total_history_chart(history_points, history_errors)
         + render_table(file1, file2)
     )
     return html_page("clk monitor", body, refresh)
