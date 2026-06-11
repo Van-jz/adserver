@@ -75,6 +75,45 @@ def get_log_file_for_day(log_file: str, archive_dir: str, days_ago: int) -> str:
     return os.path.join(archive_dir, archive_name)
 
 
+def cleanup_old_purchase_logs(archive_dir: str, logger: logging.Logger, retention_days: int = 10, dry_run: bool = False) -> int:
+    """清理归档目录中保留天数前及更早的 purchase_log.YYYYMMDD 文件"""
+    if not os.path.isdir(archive_dir):
+        logger.info(f"purchase_log 目录不存在，跳过清理: {os.path.abspath(archive_dir)}")
+        return 0
+
+    cutoff_date = (datetime.now() - timedelta(days=retention_days)).date()
+    pattern = re.compile(r'^purchase_log\.(\d{8})$')
+    cleaned_count = 0
+
+    for filename in os.listdir(archive_dir):
+        match = pattern.match(filename)
+        if not match:
+            continue
+
+        try:
+            log_date = datetime.strptime(match.group(1), '%Y%m%d').date()
+        except ValueError:
+            logger.warning(f"跳过日期格式异常的归档日志: {filename}")
+            continue
+
+        if log_date > cutoff_date:
+            continue
+
+        file_path = os.path.join(archive_dir, filename)
+        try:
+            if dry_run:
+                logger.info(f"[DRY RUN] 将清理历史归档日志: {file_path}")
+            else:
+                os.remove(file_path)
+                logger.info(f"已清理历史归档日志: {file_path}")
+            cleaned_count += 1
+        except OSError as e:
+            logger.warning(f"清理历史归档日志失败: {file_path} - {e}")
+
+    logger.info(f"purchase_log 清理完成，清理文件数: {cleaned_count}")
+    return cleaned_count
+
+
 def extract_curl_commands(log_file: str, logger: logging.Logger, days_ago: int = 0, missing_ok: bool = False) -> List[Tuple[datetime, str]]:
     """
     从日志文件中提取指定天数前的过去一小时内的 curl 命令
@@ -429,6 +468,8 @@ def main():
         overall_success_rate = (total_success / total_executed) * 100
         logger.info(f"   总成功率: {overall_success_rate:.2f}%")
     logger.info("=" * 80)
+
+    cleanup_old_purchase_logs(archive_dir, logger, dry_run=dry_run)
 
 
 if __name__ == '__main__':
