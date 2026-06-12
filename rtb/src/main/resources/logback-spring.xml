@@ -9,6 +9,7 @@
     <springProperty scope="context" name="LOG_HOME" source="logRootPath" defaultValue="/tmp/springboot-scaffold/logs"/>
     <!--日志文件名称：这里spring.application.name表示工程名称-->
     <springProperty scope="context" name="APP_NAME" source="spring.application.name"/>
+    <springProperty scope="context" name="LOG_MACHINE_ID" source="machineId" defaultValue="${MACHINE_ID:-unknown}"/>
 
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
@@ -37,7 +38,7 @@
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <!--文件路径,定义了日志的切分方式——把每一天的日志归档到一个文件中,以防止日志填满整个磁盘空间-->
             <!--使用 Asia/Shanghai 时区（UTC+8）进行日志切分-->
-            <FileNamePattern>${LOG_HOME}/${APP_NAME}/info.${APP_ENV}_%d{yyyy-MM-dd,Asia/Shanghai}.part_%i.log
+            <FileNamePattern>${LOG_HOME}/${APP_NAME}/info.${APP_ENV}.${LOG_MACHINE_ID}_%d{yyyy-MM-dd,Asia/Shanghai}.part_%i.log
             </FileNamePattern>
             <!--只保留最近30天的日志-->
             <maxHistory>30</maxHistory>
@@ -67,7 +68,7 @@
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <!--文件路径,定义了日志的切分方式——把每一天的日志归档到一个文件中,以防止日志填满整个磁盘空间-->
             <!--使用 Asia/Shanghai 时区（UTC+8）进行日志切分-->
-            <FileNamePattern>${LOG_HOME}/${APP_NAME}/error.${APP_ENV}_%d{yyyy-MM-dd,Asia/Shanghai}.part_%i.log
+            <FileNamePattern>${LOG_HOME}/${APP_NAME}/error.${APP_ENV}.${LOG_MACHINE_ID}_%d{yyyy-MM-dd,Asia/Shanghai}.part_%i.log
             </FileNamePattern>
             <!--只保留最近30天的日志-->
             <maxHistory>30</maxHistory>
