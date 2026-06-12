@@ -11,6 +11,7 @@ python调用示例：
 
 import smtplib
 import os
+import sys
 from email.header import Header
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -66,6 +67,7 @@ def send_mail(subject, content, to):
                 if recipient.strip()
             ]
         if not recipients:
+            print("warning: send_mail failed: no recipients", file=sys.stderr)
             return "failed"
 
         # 构造 UTF-8 纯文本邮件，标题、正文和收件人由调用方传入。
@@ -94,7 +96,8 @@ def send_mail(subject, content, to):
             recipients,
             msg.as_string()
         )
-    except Exception:
+    except Exception as exc:
+        print(f"warning: send_mail failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return "failed"
     finally:
         if server:
