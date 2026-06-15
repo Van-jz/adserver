@@ -14,6 +14,7 @@ import hashlib
 import time
 import subprocess
 import shlex
+import glob
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set, Tuple, Iterator
 from collections import defaultdict
@@ -1298,6 +1299,11 @@ class Orchestrator:
         default_config = {
             'log_dir': '/data/disk0/home/luoxun/logs/springboot-scaffold',
             'log_prefix': 'info.prod0320',
+            'enable_increase_info_log': True,
+            'increase_log_dir': 'increase_info_log',
+            'increase_log_prefix': 'increase_info_log',
+            'increase_log_wait_seconds': 5,
+            'increase_log_wait_attempts': 3,
             'pixelid_token_cnt_file': 'pixelid_token_cnt.txt',
             'clicks_temp_file': 'clicks_temp.txt',
             'clicks_file': 'clicks.txt',
@@ -1345,6 +1351,19 @@ class Orchestrator:
                 'last_run': None
             }
 
+    def get_log_start_position(self, state: Dict[str, Any], log_file: str) -> int:
+        """按旧版状态格式读取指定日志文件的起始位置。"""
+        log_file_abs = os.path.abspath(log_file)
+        last_log_file = state.get('last_log_file')
+        if last_log_file:
+            last_log_file_abs = os.path.abspath(last_log_file)
+            if last_log_file in (log_file, log_file_abs) or last_log_file_abs == log_file_abs:
+                try:
+                    return int(state.get('last_position', 0))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
     def save_state(self, state: Dict[str, Any]) -> None:
         """保存状态"""
         try:
@@ -1353,23 +1372,177 @@ class Orchestrator:
         except Exception as e:
             self.logger.error(f"保存状态失败: {e}")
 
-    def find_latest_log_file(self) -> str:
-        """查找最新的日志文件"""
+    def resolve_increase_log_dir(self) -> str:
+        """解析 increase_info_log 目录；相对路径按 log_dir 下的子目录处理。"""
+        increase_log_dir = self.config.get('increase_log_dir', 'increase_info_log')
+        if os.path.isabs(increase_log_dir):
+            return increase_log_dir
+        return os.path.join(self.config['log_dir'], increase_log_dir)
+
+    def parse_log_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        """解析日志文件名，兼容 info.prod0320_日期.part_N.log 和 info.prod0320.IP_日期.part_N.log。"""
+        log_prefix = re.escape(self.config['log_prefix'])
+        pattern = re.compile(
+            rf'^{log_prefix}(?:\.(?P<ip>[^_]+))?_(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.part_(?P<part>\d+)\.log$'
+        )
+        match = pattern.match(filename)
+        if not match:
+            return None
+        return {
+            'date': match.group('date'),
+            'part': int(match.group('part')),
+            'ip': match.group('ip') or ''
+        }
+
+    def parse_increase_log_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        """解析 increase_info_log.<ip>.YYYYMMDD.HHMM[.seq] 增量日志文件名。"""
+        log_prefix = re.escape(self.config.get('increase_log_prefix', 'increase_info_log'))
+        pattern = re.compile(
+            rf'^{log_prefix}\.(?P<ip>.+)\.(?P<date>\d{{8}})\.(?P<hour_minute>\d{{4}})(?:\.(?P<seq>\d+))?$'
+        )
+        match = pattern.match(filename)
+        if not match:
+            return None
+        raw_date = match.group('date')
+        return {
+            'date': f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}",
+            'part': 0,
+            'ip': match.group('ip') or '',
+            'hour_minute': match.group('hour_minute'),
+            'seq': int(match.group('seq') or 0)
+        }
+
+    def current_increase_log_stamp(self) -> str:
+        """返回当前 5 分钟时间片的 YYYYMMDD.HHMM，例如 15:41 -> 20260615.1540。"""
+        now = datetime.now()
+        bucket_minute = (now.minute // 5) * 5
+        return now.replace(minute=bucket_minute, second=0, microsecond=0).strftime('%Y%m%d.%H%M')
+
+    def find_increase_logs_for_stamp(self, stamp: str) -> List[str]:
+        """查找指定 YYYYMMDD.HHMM 时间片的 increase_info_log 文件。"""
+        increase_log_dir = self.resolve_increase_log_dir()
+        if not os.path.isdir(increase_log_dir):
+            return []
+
+        increase_prefix = re.escape(self.config.get('increase_log_prefix', 'increase_info_log'))
+        pattern = re.compile(rf'^{increase_prefix}\..*\.{re.escape(stamp)}(?:\.\d+)?$')
+        glob_pattern = os.path.join(
+            increase_log_dir,
+            f"{self.config.get('increase_log_prefix', 'increase_info_log')}.*.{stamp}*"
+        )
+        return sorted(
+            path
+            for path in glob.glob(glob_pattern)
+            if os.path.isfile(path) and pattern.match(os.path.basename(path))
+        )
+
+    def wait_for_current_increase_log(self) -> None:
+        """运行前等待当前 5 分钟时间片的 increase_info_log 文件落盘；缺失只记日志不阻断流程。"""
+        if not self.config.get('enable_increase_info_log', True):
+            return
+
+        stamp = self.current_increase_log_stamp()
+        increase_log_dir = self.resolve_increase_log_dir()
+        wait_seconds = int(self.config.get('increase_log_wait_seconds', 5))
+        wait_attempts = int(self.config.get('increase_log_wait_attempts', 3))
+
+        for attempt in range(wait_attempts + 1):
+            matched = self.find_increase_logs_for_stamp(stamp)
+            if matched:
+                self.logger.info(
+                    f"当前 5 分钟时间片 increase_info_log 已存在: stamp={stamp}, "
+                    f"files={len(matched)}, first={matched[0]}"
+                )
+                return
+
+            if attempt < wait_attempts:
+                self.logger.warning(
+                    f"当前 5 分钟时间片 increase_info_log 尚未生成，等待 {wait_seconds}s 后重试 "
+                    f"({attempt + 1}/{wait_attempts}): dir={increase_log_dir}, stamp={stamp}"
+                )
+                time.sleep(wait_seconds)
+
+        self.logger.warning(
+            f"当前 5 分钟时间片 increase_info_log 缺失，已等待 {wait_seconds * wait_attempts}s，"
+            f"继续执行后续流程: dir={increase_log_dir}, stamp={stamp}"
+        )
+
+    def find_log_files_for_latest_date(self) -> List[Dict[str, Any]]:
+        """查找本轮处理文件：最新主日志文件 + 当前 5 分钟时间片增量日志。"""
         log_dir = self.config['log_dir']
         log_prefix = self.config['log_prefix']
 
         try:
             files = os.listdir(log_dir)
-            log_files = [f for f in files if f.startswith(log_prefix) and f.endswith('.log')]
+            log_files = []
+            main_log_files = []
+            for filename in files:
+                if not (filename.startswith(log_prefix) and filename.endswith('.log')):
+                    continue
+                parsed = self.parse_log_filename(filename)
+                log_file = os.path.join(log_dir, filename)
+                if not os.path.isfile(log_file):
+                    continue
+                main_log_files.append({
+                    'path': log_file,
+                    'name': filename,
+                    'date': parsed['date'] if parsed else '',
+                    'part': parsed['part'] if parsed else 0,
+                    'ip': parsed['ip'] if parsed else '',
+                    'source': 'info_log',
+                    'hour_minute': '',
+                    'seq': 0,
+                    'mtime': os.path.getmtime(log_file)
+                })
+
+            if main_log_files:
+                log_files.append(max(main_log_files, key=lambda item: item['mtime']))
+
+            if self.config.get('enable_increase_info_log', True):
+                increase_log_dir = self.resolve_increase_log_dir()
+                if os.path.isdir(increase_log_dir):
+                    increase_stamp = self.current_increase_log_stamp()
+                    increase_unmatched_log_files = []
+                    for log_file in self.find_increase_logs_for_stamp(increase_stamp):
+                        filename = os.path.basename(log_file)
+                        parsed = self.parse_increase_log_filename(filename)
+                        if not parsed:
+                            increase_unmatched_log_files.append(filename)
+                            continue
+                        log_files.append({
+                            'path': log_file,
+                            'name': filename,
+                            'date': parsed['date'],
+                            'part': parsed['part'],
+                            'ip': parsed['ip'],
+                            'source': 'increase_info_log',
+                            'hour_minute': parsed['hour_minute'],
+                            'seq': parsed['seq'],
+                            'mtime': os.path.getmtime(log_file)
+                        })
+                    if increase_unmatched_log_files:
+                        self.logger.warning(
+                            f"跳过 {len(increase_unmatched_log_files)} 个不符合 increase_info_log 格式的日志文件: "
+                            + ', '.join(sorted(increase_unmatched_log_files)[:5])
+                        )
+                else:
+                    self.logger.info(f"increase_info_log 目录不存在，跳过: {increase_log_dir}")
 
             if not log_files:
-                raise Exception(f"在目录 {log_dir} 中未找到日志文件")
+                raise Exception(f"在目录 {log_dir} 中未找到可解析的日志文件")
 
-            # 按修改时间排序
-            log_files_with_time = [(f, os.path.getmtime(os.path.join(log_dir, f))) for f in log_files]
-            log_files_with_time.sort(key=lambda x: x[1], reverse=True)
+            log_files.sort(
+                key=lambda item: (
+                    0 if item['source'] == 'info_log' else 1,
+                    item['hour_minute'],
+                    item['ip'],
+                    item['seq'],
+                    item['name']
+                )
+            )
 
-            return os.path.join(log_dir, log_files_with_time[0][0])
+            return log_files
+
         except Exception as e:
             self.logger.error(f"查找日志文件失败: {e}")
             raise
@@ -1380,7 +1553,8 @@ class Orchestrator:
         start_position: int,
         click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
         bundle_map_changed: bool = False,
-        bundle_map_load_stats: Optional[Dict[str, int]] = None
+        bundle_map_load_stats: Optional[Dict[str, int]] = None,
+        clear_output: bool = True
     ) -> tuple:
         """运行日志提取，返回 (end_position, extracted_url_count, bundle_map_changed)"""
         self.logger.info("步骤 1: 提取日志数据")
@@ -1389,11 +1563,13 @@ class Orchestrator:
         pixelid_token_cnt_file = self.config['pixelid_token_cnt_file']
 
         # 清空临时文件
-        try:
-            open(clicks_temp_file, 'w').close()
-        except Exception as e:
-            self.logger.warning(f"清空临时文件失败: {e}")
+        if clear_output:
+            try:
+                open(clicks_temp_file, 'w').close()
+            except Exception as e:
+                self.logger.warning(f"清空临时文件失败: {e}")
 
+        self.logger.info(f"开始处理日志文件: {log_file}")
         self.logger.info(f"开始从位置 {start_position} 处理日志文件...")
 
         # 直接调用内部函数
@@ -1566,30 +1742,58 @@ class Orchestrator:
             state = self.load_state()
             self.logger.info(f"加载状态: {state}")
 
-            # 查找最新日志文件
-            log_file = self.find_latest_log_file()
-            self.logger.info(f"使用日志文件: {log_file}")
+            # 等待当前时间点的增量日志落盘；缺失时只记录日志，不阻断后续处理。
+            self.wait_for_current_increase_log()
 
-            # 确定起始位置
-            start_position = 0
-            if state.get('last_log_file') == log_file:
-                start_position = state.get('last_position', 0)
-            else:
-                self.logger.info(f"日志文件已更换，从头开始处理")
-
-            self.logger.info(f"起始位置: {start_position}")
+            # 查找本轮处理文件
+            log_files = self.find_log_files_for_latest_date()
+            self.logger.info(
+                f"使用日志文件数: {len(log_files)}"
+            )
+            for log_item in log_files:
+                display_ip = log_item['ip'] or '(no ip)'
+                self.logger.info(
+                    f"  日志文件: {log_item['path']} "
+                    f"(source={log_item['source']}, date={log_item['date']}, "
+                    f"part={log_item['part']}, ip={display_ip})"
+                )
 
             # 获取目标比例
             target_ratio = self.config.get('total_ratio', 0.04)
 
             # 步骤 1: 提取日志
-            end_position, extracted_count, bundle_map_dirty = self.run_extract_log(
-                log_file,
-                start_position,
-                click_id_bundle_map,
-                False,
-                {'migrated': 0, 'timestamp_fixed': 0, 'skipped_invalid': 0}
-            )
+            extracted_count = 0
+            last_log_file = None
+            last_position = 0
+
+            for index, log_item in enumerate(log_files):
+                log_file = log_item['path']
+                is_increase_log = log_item['source'] == 'increase_info_log'
+                start_position = 0 if is_increase_log else self.get_log_start_position(state, log_file)
+                file_size = os.path.getsize(log_file)
+                if start_position > file_size:
+                    self.logger.warning(
+                        f"日志文件大小小于历史位置，重置为从头处理: {log_file}, "
+                        f"position={start_position}, size={file_size}"
+                    )
+                    start_position = 0
+
+                if is_increase_log:
+                    self.logger.info(f"增量日志全量读取，不记录文件位置: {log_file}")
+                self.logger.info(f"起始位置: {start_position}")
+                end_position, file_extracted_count, bundle_map_dirty = self.run_extract_log(
+                    log_file,
+                    start_position,
+                    click_id_bundle_map,
+                    bundle_map_dirty,
+                    {'migrated': 0, 'timestamp_fixed': 0, 'skipped_invalid': 0},
+                    index == 0
+                )
+                extracted_count += file_extracted_count
+                if not is_increase_log:
+                    last_log_file = log_file
+                    last_position = end_position
+
             if bundle_map_dirty:
                 save_bundle_map(self.bundle_map_file, click_id_bundle_map, self.logger)
                 bundle_map_dirty = False
@@ -1602,8 +1806,8 @@ class Orchestrator:
 
             # 更新状态
             new_state = {
-                'last_log_file': log_file,
-                'last_position': end_position,
+                'last_log_file': last_log_file,
+                'last_position': last_position,
                 'last_run': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.save_state(new_state)

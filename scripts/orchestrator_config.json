@@ -1,5 +1,10 @@
 {
   "log_prefix": "info.prod0320",
+  "enable_increase_info_log": true,
+  "increase_log_dir": "increase_info_log",
+  "increase_log_prefix": "increase_info_log",
+  "increase_log_wait_seconds": 5,
+  "increase_log_wait_attempts": 3,
   "pixelid_token_cnt_file": "pixelid_token_cnt.txt",
   "clicks_temp_file": "clicks_temp.txt",
   "clicks_file": "clicks.txt",

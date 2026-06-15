@@ -3,18 +3,18 @@
 # Run commands from the repository root.
 #
 # Start:
-#   python3 scripts/stat_monitor/clk_monitor_page.py --data-dir /data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat
+#   python3 scripts/stat_monitor/clk_monitor_page.py --data-dir /data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat_merge
 #   Open http://<server-ip>:18080/
 #
 # Start in background:
-#   nohup python3 scripts/stat_monitor/clk_monitor_page.py --data-dir /data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat > logs/clk_monitor_page.log 2>&1 &
+#   nohup python3 scripts/stat_monitor/clk_monitor_page.py --data-dir /data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat_merge > logs/clk_monitor_page.log 2>&1 &
 #
 # Stop:
 #   If running in the foreground, press Ctrl+C.
 #   If running in the background, find the process and kill it:
 #     ps -ef | grep scripts/stat_monitor/clk_monitor_page.py
 #     kill <pid>
-"""Tiny web page for comparing the latest two clk_stat files."""
+"""Tiny web page for comparing the latest two clk_stat_merge files."""
 
 import argparse
 import csv
@@ -29,7 +29,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 
-DEFAULT_DATA_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
+STAT_FILE_PREFIX = "clk_stat_merge."
+DEFAULT_DATA_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat_merge"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18080
 DEFAULT_REFRESH = 1800
@@ -66,8 +67,8 @@ class TotalClickPoint:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve a simple clk_stat diff monitor page.")
-    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="directory containing clk_stat files")
+    parser = argparse.ArgumentParser(description="Serve a simple clk_stat_merge diff monitor page.")
+    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="directory containing clk_stat_merge files")
     parser.add_argument("--host", default=DEFAULT_HOST, help="listen host")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="listen port")
     parser.add_argument("--refresh", type=int, default=DEFAULT_REFRESH, help="page auto refresh seconds")
@@ -78,14 +79,14 @@ def is_candidate_file(name: str, path: str) -> bool:
     if not os.path.isfile(path):
         return False
     lower_name = name.lower()
-    return lower_name.endswith(ALLOWED_SUFFIXES) or lower_name.startswith("clk_stat.")
+    return lower_name.startswith(STAT_FILE_PREFIX)
 
 
 def stat_time_from_name(name: str) -> Optional[datetime]:
-    if not name.startswith("clk_stat."):
+    if not name.startswith(STAT_FILE_PREFIX):
         return None
 
-    stamp = name[len("clk_stat.") :]
+    stamp = name[len(STAT_FILE_PREFIX) :]
     digits = "".join(ch for ch in stamp if ch.isdigit())
     if len(digits) < 12:
         return None
@@ -96,16 +97,15 @@ def stat_time_from_name(name: str) -> Optional[datetime]:
         return None
 
 
-def stat_time_for_path(path: str) -> datetime:
-    return stat_time_from_name(os.path.basename(path)) or datetime.fromtimestamp(os.path.getmtime(path))
-
-
 def candidate_files(data_dir: str) -> List[Tuple[datetime, float, str]]:
     entries: List[Tuple[datetime, float, str]] = []
     for name in os.listdir(data_dir):
         path = os.path.join(data_dir, name)
         if is_candidate_file(name, path):
-            entries.append((stat_time_for_path(path), os.path.getmtime(path), path))
+            stat_time = stat_time_from_name(name)
+            if stat_time is None:
+                continue
+            entries.append((stat_time, os.path.getmtime(path), path))
     return entries
 
 
@@ -278,22 +278,15 @@ def total_click_cell(rows: Dict[str, ClickCell]) -> ClickCell:
     return ClickCell(present=True, value=total, raw=str(total))
 
 
-def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClickPoint], List[float], List[str]]:
-    entries = [entry for entry in candidate_files(data_dir) if os.path.basename(entry[2]).startswith("clk_stat.")]
-    if not entries:
-        return [], [], []
-
-    entries.sort(key=lambda item: (item[0], item[1]))
-    newest_time = entries[-1][0]
-    cutoff_time = newest_time - timedelta(hours=hours)
-    comparison_cutoff_time = cutoff_time - timedelta(days=1)
+def load_totals_for_window(
+    entries: List[Tuple[datetime, float, str]],
+    start_time: datetime,
+    end_time: datetime,
+    errors: List[str],
+) -> Dict[datetime, float]:
     totals_by_time: Dict[datetime, float] = {}
-    points: List[TotalClickPoint] = []
-    yesterday_totals: List[float] = []
-    errors: List[str] = []
-
     for stat_time, _, path in entries:
-        if stat_time < comparison_cutoff_time or stat_time > newest_time:
+        if stat_time < start_time or stat_time > end_time:
             continue
         try:
             parsed = parse_stat_file(path)
@@ -302,14 +295,33 @@ def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClick
             continue
 
         totals_by_time[stat_time] = total_click_cell(parsed.rows).value or 0.0
+    return totals_by_time
+
+
+def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClickPoint], List[float], List[str]]:
+    entries = candidate_files(data_dir)
+    if not entries:
+        return [], [], []
+
+    entries.sort(key=lambda item: (item[0], item[1]))
+    newest_time = entries[-1][0]
+    current_start_time = newest_time - timedelta(hours=hours)
+    yesterday_start_time = current_start_time - timedelta(days=1)
+    yesterday_end_time = newest_time - timedelta(days=1)
+    points: List[TotalClickPoint] = []
+    comparison_totals: List[float] = []
+    errors: List[str] = []
+
+    current_totals = load_totals_for_window(entries, current_start_time, newest_time, errors)
+    yesterday_totals = load_totals_for_window(entries, yesterday_start_time, yesterday_end_time, errors)
 
     for stat_time, _, path in entries:
-        if stat_time < cutoff_time or stat_time > newest_time:
+        if stat_time < current_start_time or stat_time > newest_time:
             continue
-        if stat_time not in totals_by_time:
+        if stat_time not in current_totals:
             continue
 
-        total = totals_by_time[stat_time]
+        total = current_totals[stat_time]
         points.append(
             TotalClickPoint(
                 path=path,
@@ -318,9 +330,9 @@ def build_total_history(data_dir: str, hours: int = 24) -> Tuple[List[TotalClick
                 total=total,
             )
         )
-        yesterday_totals.append(totals_by_time.get(stat_time - timedelta(days=1), 0.0))
+        comparison_totals.append(yesterday_totals.get(stat_time - timedelta(days=1), 0.0))
 
-    return points, yesterday_totals, errors
+    return points, comparison_totals, errors
 
 
 def build_table_rows(file1: ParsedStatFile, file2: ParsedStatFile) -> List[Tuple[str, ClickCell, ClickCell, str]]:

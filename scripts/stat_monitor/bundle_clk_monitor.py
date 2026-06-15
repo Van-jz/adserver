@@ -18,6 +18,9 @@ BLOCKED_DOMAINS = ("ad.ap4r.com", "s16.kwai.net", "adx.opera.com", "liftoff-crea
 REQUEST_MARKER = "收到 kwaiadsinfo postshow 请求数据: "
 UNKNOWN_BUNDLE = "(unknown)"
 DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
+DEFAULT_LOG_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold"
+DEFAULT_LOG_PREFIX = "info.prod0320"
+DEFAULT_BUNDLE_MAP_FILE = "click_id_bundle_map.json"
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
 MAIL_ALERT_MINUTES = 30
 MAIL_ALERT_TO = "hanjing915@qq.com"
@@ -25,48 +28,8 @@ CLICK_DROP_ALERT_THRESHOLD = 0.10
 
 
 def script_dir() -> str:
-    """返回当前脚本所在目录，用来定位默认配置文件。"""
+    """返回当前脚本所在目录，用来定位相邻的 send_mail 模块。"""
     return os.path.dirname(os.path.abspath(__file__))
-
-
-def resolve_existing_path(path: str, base_dir: str) -> str:
-    """解析输入文件路径；相对路径优先按当前目录，其次按 base_dir 处理。"""
-    if os.path.isabs(path):
-        return path
-    if os.path.exists(path):
-        return os.path.abspath(path)
-    candidate = os.path.join(base_dir, path)
-    return os.path.abspath(candidate)
-
-
-def resolve_output_path(path: str, base_dir: str) -> str:
-    """解析配置里的附属文件路径；相对路径统一按配置文件所在目录处理。"""
-    if os.path.isabs(path):
-        return path
-    return os.path.abspath(os.path.join(base_dir, path))
-
-
-def load_config(config_path: str) -> Tuple[Dict[str, Any], str]:
-    """加载 orchestrator 配置，并返回合并默认值后的配置和配置文件目录。"""
-    defaults = {
-        "log_dir": "/data/disk0/home/luoxun/logs/springboot-scaffold",
-        "log_prefix": "info.prod0320",
-        "bundle_map_file": "click_id_bundle_map.json",
-    }
-
-    config_file = resolve_existing_path(config_path, script_dir())
-    config = dict(defaults)
-    try:
-        with open(config_file, "r", encoding="utf-8-sig") as f:
-            loaded = json.load(f)
-        if isinstance(loaded, dict):
-            config.update(loaded)
-    except FileNotFoundError:
-        print(f"warning: config file not found: {config_file}; using defaults", file=sys.stderr)
-    except json.JSONDecodeError as exc:
-        print(f"warning: invalid config file {config_file}: {exc}; using defaults", file=sys.stderr)
-
-    return config, os.path.dirname(config_file)
 
 
 def load_json_file(path: str, default: Any) -> Any:
@@ -136,6 +99,18 @@ def format_log_time(ts: float) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_replay_time(value: str) -> datetime:
+    """解析历史回放时间参数。"""
+    for fmt in ("%Y%m%d %H%M", "%Y%m%d%H%M", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(
+        f"invalid time '{value}', expected format like '20260615 1500'"
+    )
+
+
 def parse_json_data(request_body_str: str) -> Optional[Dict[str, Any]]:
     """解析 postshow 请求体，兼容直接 JSON 和 data=URL编码JSON 两种格式。"""
     try:
@@ -195,11 +170,28 @@ def parse_url_pixel_id(url: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def load_bundle_map(bundle_map_file: Optional[str]) -> Dict[str, str]:
-    """读取 click_id 到 bundle 的兜底映射文件；缺失时返回空映射。"""
+    """读取 click_id 到 bundle 的兜底映射文件；兼容值为字符串或对象的新旧格式。"""
     if not bundle_map_file:
         return {}
     data = load_json_file(bundle_map_file, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+
+    bundle_map = {}
+    for click_id, value in data.items():
+        if not isinstance(click_id, str) or not click_id:
+            continue
+
+        bundle = None
+        if isinstance(value, str):
+            bundle = value
+        elif isinstance(value, dict):
+            bundle = value.get("bundle")
+
+        if isinstance(bundle, str) and bundle:
+            bundle_map[click_id] = bundle
+
+    return bundle_map
 
 
 def find_last_log_time(log_file: str) -> Optional[Tuple[float, str]]:
@@ -495,12 +487,12 @@ def maybe_send_zero_clicks_alert(
     content = "\n".join(
         [
             f"！机器{machine_ip}已经{minutes}分钟没有点击了！",
-            f"machine_ip: {machine_ip}",
-            f"minutes: {minutes}",
-            f"total_clicks: {total_clicks}",
-            f"log_file: {latest_log_file}",
-            f"scanned_log_time_range: {scanned_range}",
-            f"output_file: {output_file}",
+            f"机器IP machine_ip: {machine_ip}",
+            f"统计时间窗 minutes: {minutes}",
+            f"总点击 total_clicks: {total_clicks}",
+            f"日志文件 log_file: {latest_log_file}",
+            f"扫描时间窗 scanned_log_time_range: {scanned_range}",
+            f"输出文件 output_file: {output_file}",
         ]
     )
     result = send_mail(subject, content, MAIL_ALERT_TO)
@@ -549,17 +541,17 @@ def maybe_send_click_drop_alert(
     subject = f"[clk_monitor] {machine_ip} clicks dropped {drop_percent:.1f}% alert"
     content = "\n".join(
         [
-            f"！机器{machine_ip}当次点击较昨天同时间下降超过{CLICK_DROP_ALERT_THRESHOLD:.0%}！",
-            f"machine_ip: {machine_ip}",
-            f"current_time: {run_dt.strftime('%Y-%m-%d %H:%M')}",
-            f"yesterday_same_time: {yesterday_dt.strftime('%Y-%m-%d %H:%M')}",
-            f"current_total_clicks: {total_clicks}",
-            f"yesterday_total_clicks: {yesterday_total_clicks}",
-            f"drop_percent: {drop_percent:.2f}%",
-            f"log_file: {latest_log_file}",
-            f"scanned_log_time_range: {scanned_range}",
-            f"output_file: {output_file}",
-            f"yesterday_output_file: {yesterday_file}",
+            f"！机器{machine_ip}当轮点击较昨天同时间下降超过{CLICK_DROP_ALERT_THRESHOLD:.0%}！",
+            f"机器IP machine_ip: {machine_ip}",
+            f"当前时间 current_time: {run_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"昨日同期 yesterday_same_time: {yesterday_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"本轮总点击 current_total_clicks: {total_clicks}",
+            f"昨日同期总点击 yesterday_total_clicks: {yesterday_total_clicks}",
+            f"下跌比例 drop_percent: {drop_percent:.2f}%",
+            f"日志文件 log_file: {latest_log_file}",
+            f"扫描时间段 scanned_log_time_range: {scanned_range}",
+            f"输出文件 output_file: {output_file}",
+            f"昨日文件 yesterday_output_file: {yesterday_file}",
         ]
     )
     result = send_mail(subject, content, MAIL_ALERT_TO)
@@ -594,24 +586,85 @@ def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: d
     return deleted
 
 
+def build_scanned_range(stats: Dict[str, Any]) -> str:
+    """从扫描统计中生成展示用时间范围。"""
+    if stats.get("scanned_log_time_start") and stats.get("scanned_log_time_end"):
+        return f"{stats['scanned_log_time_start']} -> {stats['scanned_log_time_end']}"
+    return "N/A"
+
+
+def run_window(
+    args: argparse.Namespace,
+    log_files: List[str],
+    bundle_map: Dict[str, str],
+    window_start_time: float,
+    window_end_time: float,
+    output_dt: datetime,
+    send_alerts: bool,
+) -> int:
+    """扫描一个时间窗口，输出统计结果并按需发送报警。"""
+    window_log_files = find_window_log_files(log_files, window_start_time, log_files[0])
+    latest_log_file = window_log_files[-1] if window_log_files else log_files[0]
+
+    window_events, stats = scan_window_clicks(
+        window_log_files,
+        window_start_time,
+        window_end_time,
+        bundle_map,
+    )
+    rows = build_rows(window_events)
+    scanned_range = build_scanned_range(stats)
+    output_text = build_output_text(
+        latest_log_file,
+        int(round((window_end_time - window_start_time) / 60)),
+        scanned_range,
+        len(window_events),
+        render_table(rows, args.top, args.all),
+    )
+    print(output_text)
+    output_file = write_output_file(args.output_dir, output_text, output_dt)
+    print(f"output_file: {output_file}")
+
+    if send_alerts:
+        drop_alert_result = maybe_send_click_drop_alert(
+            args.output_dir,
+            output_dt,
+            len(window_events),
+            latest_log_file,
+            scanned_range,
+            output_file,
+        )
+        if drop_alert_result:
+            print(f"click_drop_alert_mail: {drop_alert_result}")
+        alert_result = maybe_send_zero_clicks_alert(
+            int(round((window_end_time - window_start_time) / 60)),
+            len(window_events),
+            latest_log_file,
+            scanned_range,
+            output_file,
+        )
+        if alert_result:
+            print(f"alert_mail: {alert_result}")
+
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     """定义并解析命令行参数。"""
     parser = argparse.ArgumentParser(description="Monitor recent click counts by bundle.")
-    parser.add_argument(
-        "--config",
-        default=os.path.join(script_dir(), "orchestrator_config.json"),
-        help="path to orchestrator config",
-    )
     parser.add_argument("--min", type=int, default=30, help="minutes before the latest log timestamp to scan")
+    parser.add_argument("--from", dest="replay_from", type=parse_replay_time, help="replay start time, e.g. '20260615 1500'")
+    parser.add_argument("--to", dest="replay_to", type=parse_replay_time, help="replay end time, e.g. '20260615 1800'")
     parser.add_argument("--top", type=int, default=20, help="number of bundles to display")
     parser.add_argument("--all", action="store_true", help="show all bundles")
+    parser.add_argument("--no-alert", action="store_true", help="do not send alert mail")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="directory to write clk_stat.YYYYMMDD-hhmm")
     parser.add_argument("--retention-days", type=int, default=3, help="days to keep clk_stat.* outputs")
     return parser.parse_args()
 
 
 def main() -> int:
-    """脚本入口：读取配置、确定窗口、扫描日志并输出统计表。"""
+    """脚本入口：确定窗口、扫描日志并输出统计表。"""
     args = parse_args()
     run_dt = datetime.now()
     if args.min <= 0:
@@ -623,22 +676,42 @@ def main() -> int:
     if args.retention_days <= 0:
         print("error: --retention-days must be positive", file=sys.stderr)
         return 2
-
-    config, config_dir = load_config(args.config)
-    log_dir = config.get("log_dir")
-    log_prefix = config.get("log_prefix", "info.prod0320")
-    if not log_dir:
-        print("error: log_dir is empty", file=sys.stderr)
+    if (args.replay_from is None) != (args.replay_to is None):
+        print("error: --from and --to must be used together", file=sys.stderr)
         return 2
-    if not os.path.isabs(log_dir):
-        log_dir = resolve_output_path(log_dir, config_dir)
+    if args.replay_from and args.replay_to and args.replay_to <= args.replay_from:
+        print("error: --to must be later than --from", file=sys.stderr)
+        return 2
 
-    bundle_map_file = resolve_output_path(config.get("bundle_map_file", "click_id_bundle_map.json"), config_dir)
+    log_dir = DEFAULT_LOG_DIR
+    log_prefix = DEFAULT_LOG_PREFIX
+    bundle_map_file = DEFAULT_BUNDLE_MAP_FILE
     log_files = find_log_files(log_dir, log_prefix)
     latest_log_file = log_files[0]
     window_seconds = args.min * 60
+    send_alerts = not args.no_alert
 
     bundle_map = load_bundle_map(bundle_map_file)
+    if args.replay_from and args.replay_to:
+        replay_start_time = args.replay_from.timestamp()
+        replay_end_time = args.replay_to.timestamp()
+        window_start_time = replay_start_time
+        while window_start_time < replay_end_time:
+            window_end_time = min(window_start_time + window_seconds, replay_end_time)
+            output_dt = datetime.fromtimestamp(window_end_time)
+            print(f"replay_window: {format_log_time(window_start_time)} -> {format_log_time(window_end_time)}")
+            run_window(
+                args,
+                log_files,
+                bundle_map,
+                window_start_time,
+                window_end_time,
+                output_dt,
+                send_alerts=False,
+            )
+            window_start_time = window_end_time
+        return 0
+
     latest_log_time = find_latest_parsed_log_time(log_files)
     if not latest_log_time:
         output_text = build_output_text(
@@ -651,76 +724,44 @@ def main() -> int:
         print(output_text)
         output_file = write_output_file(args.output_dir, output_text, run_dt)
         print(f"output_file: {output_file}")
-        drop_alert_result = maybe_send_click_drop_alert(
-            args.output_dir,
-            run_dt,
-            0,
-            latest_log_file,
-            "N/A",
-            output_file,
-        )
-        if drop_alert_result:
-            print(f"click_drop_alert_mail: {drop_alert_result}")
+        if send_alerts:
+            drop_alert_result = maybe_send_click_drop_alert(
+                args.output_dir,
+                run_dt,
+                0,
+                latest_log_file,
+                "N/A",
+                output_file,
+            )
+            if drop_alert_result:
+                print(f"click_drop_alert_mail: {drop_alert_result}")
         deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
         print(f"cleanup_deleted: {deleted}")
-        alert_result = maybe_send_zero_clicks_alert(
-            args.min,
-            0,
-            latest_log_file,
-            "N/A",
-            output_file,
-        )
-        if alert_result:
-            print(f"alert_mail: {alert_result}")
+        if send_alerts:
+            alert_result = maybe_send_zero_clicks_alert(
+                args.min,
+                0,
+                latest_log_file,
+                "N/A",
+                output_file,
+            )
+            if alert_result:
+                print(f"alert_mail: {alert_result}")
         return 0
 
     latest_log_file, window_end_time, _ = latest_log_time
     window_start_time = window_end_time - window_seconds
-    window_log_files = find_window_log_files(log_files, window_start_time, latest_log_file)
-
-    window_events, stats = scan_window_clicks(
-        window_log_files,
+    run_window(
+        args,
+        log_files,
+        bundle_map,
         window_start_time,
         window_end_time,
-        bundle_map,
-    )
-    rows = build_rows(window_events)
-
-    if stats.get("scanned_log_time_start") and stats.get("scanned_log_time_end"):
-        scanned_range = f"{stats['scanned_log_time_start']} -> {stats['scanned_log_time_end']}"
-    else:
-        scanned_range = "N/A"
-    output_text = build_output_text(
-        latest_log_file,
-        args.min,
-        scanned_range,
-        len(window_events),
-        render_table(rows, args.top, args.all),
-    )
-    print(output_text)
-    output_file = write_output_file(args.output_dir, output_text, run_dt)
-    print(f"output_file: {output_file}")
-    drop_alert_result = maybe_send_click_drop_alert(
-        args.output_dir,
         run_dt,
-        len(window_events),
-        latest_log_file,
-        scanned_range,
-        output_file,
+        send_alerts=send_alerts,
     )
-    if drop_alert_result:
-        print(f"click_drop_alert_mail: {drop_alert_result}")
     deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
     print(f"cleanup_deleted: {deleted}")
-    alert_result = maybe_send_zero_clicks_alert(
-        args.min,
-        len(window_events),
-        latest_log_file,
-        scanned_range,
-        output_file,
-    )
-    if alert_result:
-        print(f"alert_mail: {alert_result}")
     return 0
 
 

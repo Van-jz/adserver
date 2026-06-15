@@ -196,21 +196,29 @@ sort_logs_by_date_and_seq() {
 upload_file() {
     local file=$1
     local name
+    local oss_path
     name=$(basename "$file")
+    oss_path="${OSS_PREFIX}${name}"
 
     log_info "name=${name}"
 
     if [[ "$DRY_RUN" == true ]]; then
-        log_info "dry-run: ossutil cp ${file} ${OSS_PREFIX}${name}"
+        log_info "dry-run: ossutil cp ${file} ${oss_path}"
+        log_info "dry-run: ossutil stat ${oss_path}"
         return 0
     fi
 
-    if ! ossutil cp "$file" "${OSS_PREFIX}${name}"; then
+    if ! ossutil cp "$file" "$oss_path"; then
         log_error "e=ossutil cp failed: ${file}"
         return 1
     fi
 
-    log_info "OSS文件上传成功：${name}"
+    if ! ossutil stat "$oss_path"; then
+        log_error "e=ossutil stat failed: ${oss_path}"
+        return 1
+    fi
+
+    log_info "OSS文件上传成功：${oss_path}"
     return 0
 }
 
