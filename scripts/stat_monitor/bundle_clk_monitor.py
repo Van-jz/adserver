@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Monitor recent click counts by bundle from kwaiadsinfo postshow logs."""
+"""Monitor previous half-hour click counts by bundle from kwaiadsinfo postshow logs."""
 
 import argparse
 import json
@@ -21,7 +21,10 @@ DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
 DEFAULT_LOG_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold"
 DEFAULT_LOG_PREFIX = "info.prod0320"
 DEFAULT_BUNDLE_MAP_FILE = "click_id_bundle_map.json"
+DEFAULT_CURSOR_FILE_NAME = ".bundle_clk_monitor.cursor.json"
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
+CLICK_ID_RE = re.compile(r"(?:[?&])click_id=([^&#\s]+)")
+PIXEL_ID_RE = re.compile(r"(?:[?&])pixel_id=(\d+)")
 MAIL_ALERT_MINUTES = 30
 MAIL_ALERT_TO = "hanjing915@qq.com"
 CLICK_DROP_ALERT_THRESHOLD = 0.10
@@ -71,24 +74,71 @@ def extract_request_body(log_line: str) -> Optional[str]:
     return log_line[pos + len(REQUEST_MARKER):].strip()
 
 
-def parse_log_time(log_line: str) -> Optional[Tuple[float, str]]:
-    """解析日志行首时间，返回时间戳和原始展示字符串。"""
-    match = LOG_TIME_RE.match(log_line)
-    if not match:
+def parse_log_time_parts(log_line: str) -> Optional[Tuple[str, Optional[str], str]]:
+    """快速解析行首固定格式时间，返回 (秒级字符串, 微秒字符串, 展示字符串)。"""
+    if len(log_line) < 19:
         return None
 
-    base, fraction = match.groups()
+    base = log_line[:19]
+    if (
+        base[4] != "-"
+        or base[7] != "-"
+        or base[10] != " "
+        or base[13] != ":"
+        or base[16] != ":"
+        or not (
+            base[:4].isdigit()
+            and base[5:7].isdigit()
+            and base[8:10].isdigit()
+            and base[11:13].isdigit()
+            and base[14:16].isdigit()
+            and base[17:19].isdigit()
+        )
+    ):
+        return None
+
+    fraction = None
+    display = base
+    if len(log_line) > 20 and log_line[19] in (".", ",") and log_line[20].isdigit():
+        end = 20
+        while end < len(log_line) and end < 26 and log_line[end].isdigit():
+            end += 1
+        fraction = log_line[20:end]
+        display = f"{base}.{fraction}"
+
+    return base, fraction, display
+
+
+def log_time_parts_to_timestamp(base: str, fraction: Optional[str]) -> Optional[float]:
+    """把 parse_log_time_parts 的结果转换为时间戳。"""
     try:
-        dt = datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
+        dt = datetime(
+            int(base[:4]),
+            int(base[5:7]),
+            int(base[8:10]),
+            int(base[11:13]),
+            int(base[14:16]),
+            int(base[17:19]),
+        )
     except ValueError:
         return None
 
-    display = base
     if fraction:
-        micros = fraction[:6].ljust(6, "0")
-        dt = dt.replace(microsecond=int(micros))
-        display = f"{base}.{fraction}"
-    return dt.timestamp(), display
+        dt = dt.replace(microsecond=int(fraction[:6].ljust(6, "0")))
+    return dt.timestamp()
+
+
+def parse_log_time(log_line: str) -> Optional[Tuple[float, str]]:
+    """解析日志行首时间，返回时间戳和原始展示字符串。"""
+    parsed = parse_log_time_parts(log_line)
+    if not parsed:
+        return None
+
+    base, fraction, display = parsed
+    ts = log_time_parts_to_timestamp(base, fraction)
+    if ts is None:
+        return None
+    return ts, display
 
 
 def format_log_time(ts: float) -> str:
@@ -111,13 +161,39 @@ def parse_replay_time(value: str) -> datetime:
     )
 
 
+def previous_half_hour_window(run_dt: datetime) -> Tuple[datetime, datetime, datetime]:
+    """Return (anchor, window_start, window_end) for the previous half-hour slot."""
+    # 先把运行时间归到当前半小时段的起点，再向前取完整 30 分钟窗口。
+    anchor_minute = 30 if run_dt.minute >= 30 else 0
+    anchor = run_dt.replace(minute=anchor_minute, second=0, microsecond=0)
+    window_start = anchor - timedelta(minutes=30)
+    window_end = anchor - timedelta(microseconds=1)
+    return anchor, window_start, window_end
+
+
+def is_half_hour_boundary(value: datetime) -> bool:
+    """判断时间是否落在整点或半点。"""
+    return value.minute in (0, 30) and value.second == 0 and value.microsecond == 0
+
+
+def display_window_end(anchor: datetime) -> datetime:
+    """把窗口结束锚点转换成展示和扫描使用的最后一刻。"""
+    return anchor - timedelta(microseconds=1)
+
+
 def parse_json_data(request_body_str: str) -> Optional[Dict[str, Any]]:
     """解析 postshow 请求体，兼容直接 JSON 和 data=URL编码JSON 两种格式。"""
     try:
-        body = request_body_str[5:] if request_body_str.startswith("data=") else request_body_str
-        return json.loads(urllib.parse.unquote(body))
+        if request_body_str.startswith("data="):
+            return json.loads(urllib.parse.unquote(request_body_str[5:]))
+        return json.loads(request_body_str)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return None
+        if request_body_str.startswith("data="):
+            return None
+        try:
+            return json.loads(urllib.parse.unquote(request_body_str))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
 
 
 def extract_referrer_package(json_data: Dict[str, Any]) -> Optional[str]:
@@ -151,18 +227,13 @@ def extract_urls_from_data(json_data: Dict[str, Any]) -> List[str]:
 def parse_url_pixel_id(url: str) -> Tuple[Optional[str], Optional[str]]:
     """从点击 URL 中提取 pixel_id 和 click_id；解析失败返回 (None, None)。"""
     try:
-        parsed_url = urllib.parse.urlparse(url)
-        query_params = urllib.parse.parse_qs(parsed_url.query)
+        pixel_match = PIXEL_ID_RE.search(url)
+        click_match = CLICK_ID_RE.search(url)
 
-        pixel_id = None
-        if "pixel_id" in query_params and query_params["pixel_id"]:
-            match = re.match(r"^(\d+)", query_params["pixel_id"][0])
-            if match:
-                pixel_id = match.group(1)
-
-        click_id = None
-        if "click_id" in query_params and query_params["click_id"]:
-            click_id = query_params["click_id"][0]
+        pixel_id = pixel_match.group(1) if pixel_match else None
+        click_id = click_match.group(1) if click_match else None
+        if click_id and ("%" in click_id or "+" in click_id):
+            click_id = urllib.parse.unquote_plus(click_id)
 
         return pixel_id, click_id
     except Exception:
@@ -224,11 +295,132 @@ def find_window_log_files(log_files: List[str], window_start_time: float, latest
     return sorted(selected, key=os.path.getmtime)
 
 
+def get_cursor_file_path(output_dir: str, cursor_file: Optional[str]) -> str:
+    """返回自动模式用来续读主机日志的游标文件路径。"""
+    if cursor_file:
+        return os.path.abspath(cursor_file)
+    return os.path.join(os.path.abspath(output_dir), DEFAULT_CURSOR_FILE_NAME)
+
+
+def load_scan_cursor(cursor_file: str, log_files: List[str], window_start_time: float) -> Dict[str, int]:
+    """读取上次主机日志扫描位置；不安全或不适用时返回空游标。"""
+    try:
+        with open(cursor_file, "r", encoding="utf-8") as f:
+            cursor = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"warning: cannot read clk monitor cursor {cursor_file}: {exc}", file=sys.stderr)
+        return {}
+
+    if not isinstance(cursor, dict):
+        return {}
+
+    log_file = cursor.get("log_file")
+    position = cursor.get("position")
+    cursor_time = cursor.get("log_time")
+    if not isinstance(log_file, str) or not isinstance(position, int) or position <= 0:
+        return {}
+    if log_file not in log_files:
+        return {}
+    if isinstance(cursor_time, (int, float)) and cursor_time > window_start_time:
+        return {}
+
+    try:
+        if os.path.getsize(log_file) < position:
+            return {}
+    except OSError as exc:
+        print(f"warning: cannot stat clk monitor cursor log {log_file}: {exc}", file=sys.stderr)
+        return {}
+
+    return {log_file: position}
+
+
+def save_scan_cursor(cursor_file: str, cursor: Dict[str, Any]) -> None:
+    """保存下次自动模式扫描可续读的位置。"""
+    try:
+        cursor_dir = os.path.dirname(cursor_file)
+        if cursor_dir:
+            os.makedirs(cursor_dir, exist_ok=True)
+        with open(cursor_file, "w", encoding="utf-8") as f:
+            json.dump(cursor, f, ensure_ascii=False, sort_keys=True)
+            f.write("\n")
+    except OSError as exc:
+        print(f"warning: cannot write clk monitor cursor {cursor_file}: {exc}", file=sys.stderr)
+
+
+def clear_scan_cursor(cursor_file: str) -> None:
+    """当跟踪的日志已经读到 EOF 时清除自动模式游标。"""
+    try:
+        os.remove(cursor_file)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"warning: cannot remove clk monitor cursor {cursor_file}: {exc}", file=sys.stderr)
+
+
+def update_scan_cursor(
+    cursor_file: str,
+    log_files: List[str],
+    file_positions: Dict[str, Dict[str, Any]],
+) -> None:
+    """只保留最新一个还没读到 EOF 的日志文件位置。"""
+    for log_file in reversed(log_files):
+        file_state = file_positions.get(log_file)
+        if not file_state:
+            continue
+        if file_state.get("reached_eof"):
+            continue
+
+        cursor = {
+            "log_file": log_file,
+            "position": int(file_state.get("end_position", 0)),
+            "log_time": file_state.get("next_log_time"),
+            "log_time_display": file_state.get("next_log_time_display"),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if cursor["position"] > 0:
+            save_scan_cursor(cursor_file, cursor)
+            return
+
+    clear_scan_cursor(cursor_file)
+
+
+def split_formatted_log_time(value: str) -> Tuple[str, Optional[str]]:
+    """Split a formatted log timestamp into second and fractional parts."""
+    if "." not in value:
+        return value, None
+    base, fraction = value.split(".", 1)
+    return base, fraction
+
+
+def compare_log_time_parts(
+    base: str,
+    fraction: Optional[str],
+    target_base: str,
+    target_fraction: Optional[str],
+) -> int:
+    """Compare parsed log time parts against a formatted target timestamp."""
+    if base < target_base:
+        return -1
+    if base > target_base:
+        return 1
+
+    left_fraction = (fraction or "").ljust(6, "0")
+    right_fraction = (target_fraction or "").ljust(6, "0")
+    if left_fraction < right_fraction:
+        return -1
+    if left_fraction > right_fraction:
+        return 1
+    return 0
+
+
 def scan_window_clicks(
     log_files: List[str],
     window_start_time: float,
     window_end_time: float,
     bundle_map: Dict[str, str],
+    start_positions: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """统计指定日志时间窗口内的有效点击事件，并按 click_id 去重。
 
@@ -236,10 +428,14 @@ def scan_window_clicks(
     """
     events: List[Dict[str, Any]] = []
     seen_click_ids = set()
+    window_start_display = format_log_time(window_start_time)
+    window_end_display = format_log_time(window_end_time)
+    window_start_base, window_start_fraction = split_formatted_log_time(window_start_display)
+    window_end_base, window_end_fraction = split_formatted_log_time(window_end_display)
     stats = {
         "scanned_lines": 0,
-        "scanned_log_time_start": format_log_time(window_start_time),
-        "scanned_log_time_end": format_log_time(window_end_time),
+        "scanned_log_time_start": window_start_display,
+        "scanned_log_time_end": window_end_display,
         "actual_scanned_log_time_start": None,
         "actual_scanned_log_time_end": None,
         "postshow_lines": 0,
@@ -247,28 +443,64 @@ def scan_window_clicks(
         "duplicate_click_ids": 0,
         "blocked_urls": 0,
         "valid_clicks": 0,
+        "file_positions": {},
     }
     earliest_log_time = None
     latest_log_time = None
+    start_positions = start_positions or {}
 
     last_referrer_package = None
     lines_since_referrer = 0
 
     for log_file in log_files:
         with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                parsed_log_time = parse_log_time(line)
+            start_position = start_positions.get(log_file, 0)
+            if start_position > 0:
+                f.seek(start_position)
+
+            reached_eof = True
+            end_position = f.tell()
+            latest_file_log_time = None
+            next_file_log_time = None
+            while True:
+                line_start_position = f.tell()
+                line = f.readline()
+                if not line:
+                    end_position = f.tell()
+                    break
+
+                parsed_log_time = parse_log_time_parts(line)
                 if not parsed_log_time:
                     continue
 
-                log_time, log_time_display = parsed_log_time
-                if log_time > window_end_time:
-                    continue
+                log_time_base, log_time_fraction, log_time_display = parsed_log_time
+                if compare_log_time_parts(
+                    log_time_base,
+                    log_time_fraction,
+                    window_end_base,
+                    window_end_fraction,
+                ) > 0:
+                    reached_eof = False
+                    end_position = line_start_position
+                    log_time = log_time_parts_to_timestamp(log_time_base, log_time_fraction)
+                    if log_time is not None:
+                        next_file_log_time = (log_time, log_time_display)
+                    break
 
                 # 窗口前的 postshow 也要解析，用来延续 referrer_package 上下文；
                 # 只有窗口内的 URL 才会进入最终统计。
-                in_window = log_time >= window_start_time
+                in_window = compare_log_time_parts(
+                    log_time_base,
+                    log_time_fraction,
+                    window_start_base,
+                    window_start_fraction,
+                ) >= 0
+                log_time = None
                 if in_window:
+                    log_time = log_time_parts_to_timestamp(log_time_base, log_time_fraction)
+                    if log_time is None:
+                        continue
+                    latest_file_log_time = (log_time, log_time_display)
                     stats["scanned_lines"] += 1
                     if earliest_log_time is None or log_time < earliest_log_time[0]:
                         earliest_log_time = (log_time, log_time_display)
@@ -324,6 +556,16 @@ def scan_window_clicks(
                         }
                     )
                     stats["valid_clicks"] += 1
+
+            stats["file_positions"][log_file] = {
+                "start_position": start_position,
+                "end_position": end_position,
+                "reached_eof": reached_eof,
+                "last_log_time": latest_file_log_time[0] if latest_file_log_time else None,
+                "last_log_time_display": latest_file_log_time[1] if latest_file_log_time else None,
+                "next_log_time": next_file_log_time[0] if next_file_log_time else None,
+                "next_log_time_display": next_file_log_time[1] if next_file_log_time else None,
+            }
 
     if earliest_log_time:
         stats["actual_scanned_log_time_start"] = earliest_log_time[1]
@@ -403,10 +645,7 @@ def write_output_file(output_dir: str, output_text: str, run_dt: datetime) -> st
     """将本次统计结果写入 clk_stat.YYYYMMDD-hhmm 文件，并返回文件路径。"""
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f"clk_stat.{run_dt.strftime('%Y%m%d-%H%M')}")
-    append_mode = os.path.exists(output_file)
-    with open(output_file, "a", encoding="utf-8") as f:
-        if append_mode:
-            f.write("\n" + "=" * 80 + "\n")
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(output_text)
         f.write("\n")
     return output_file
@@ -418,7 +657,7 @@ def get_clk_stat_file_path(output_dir: str, run_dt: datetime) -> str:
 
 
 def read_total_clicks_from_clk_stat(path: str) -> Optional[int]:
-    """读取 clk_stat 文件里的 total_clicks；追加写入时取最后一次结果。"""
+    """读取 clk_stat 文件里的 total_clicks；兼容历史追加文件，取最后一次结果。"""
     totals = []
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -601,19 +840,28 @@ def run_window(
     window_end_time: float,
     output_dt: datetime,
     send_alerts: bool,
+    use_cursor: bool = False,
 ) -> int:
     """扫描一个时间窗口，输出统计结果并按需发送报警。"""
     window_log_files = find_window_log_files(log_files, window_start_time, log_files[0])
     latest_log_file = window_log_files[-1] if window_log_files else log_files[0]
+    cursor_file = get_cursor_file_path(args.output_dir, args.cursor_file)
+    start_positions = load_scan_cursor(cursor_file, window_log_files, window_start_time) if use_cursor else {}
 
     window_events, stats = scan_window_clicks(
         window_log_files,
         window_start_time,
         window_end_time,
         bundle_map,
+        start_positions=start_positions,
     )
+    if use_cursor:
+        update_scan_cursor(cursor_file, window_log_files, stats.get("file_positions", {}))
     rows = build_rows(window_events)
-    scanned_range = build_scanned_range(stats)
+    scanned_range = (
+        f"{datetime.fromtimestamp(window_start_time).strftime('%Y-%m-%d %H:%M:%S')} -> "
+        f"{datetime.fromtimestamp(window_end_time).strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     output_text = build_output_text(
         latest_log_file,
         int(round((window_end_time - window_start_time) / 60)),
@@ -651,15 +899,17 @@ def run_window(
 
 def parse_args() -> argparse.Namespace:
     """定义并解析命令行参数。"""
-    parser = argparse.ArgumentParser(description="Monitor recent click counts by bundle.")
-    parser.add_argument("--min", type=int, default=30, help="minutes before the latest log timestamp to scan")
-    parser.add_argument("--from", dest="replay_from", type=parse_replay_time, help="replay start time, e.g. '20260615 1500'")
-    parser.add_argument("--to", dest="replay_to", type=parse_replay_time, help="replay end time, e.g. '20260615 1800'")
+    parser = argparse.ArgumentParser(
+        description="Monitor previous half-hour click counts by bundle.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("--time", dest="replay_time", type=parse_replay_time, help="replay anchor time, e.g. '20260615 1600' scans the previous 30 minutes")
     parser.add_argument("--top", type=int, default=20, help="number of bundles to display")
     parser.add_argument("--all", action="store_true", help="show all bundles")
     parser.add_argument("--no-alert", action="store_true", help="do not send alert mail")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="directory to write clk_stat.YYYYMMDD-hhmm")
     parser.add_argument("--retention-days", type=int, default=3, help="days to keep clk_stat.* outputs")
+    parser.add_argument("--cursor-file", default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -667,98 +917,53 @@ def main() -> int:
     """脚本入口：确定窗口、扫描日志并输出统计表。"""
     args = parse_args()
     run_dt = datetime.now()
-    if args.min <= 0:
-        print("error: --min must be positive", file=sys.stderr)
-        return 2
     if args.top is not None and args.top <= 0:
         print("error: --top must be positive", file=sys.stderr)
         return 2
     if args.retention_days <= 0:
         print("error: --retention-days must be positive", file=sys.stderr)
         return 2
-    if (args.replay_from is None) != (args.replay_to is None):
-        print("error: --from and --to must be used together", file=sys.stderr)
-        return 2
-    if args.replay_from and args.replay_to and args.replay_to <= args.replay_from:
-        print("error: --to must be later than --from", file=sys.stderr)
+    if args.replay_time and not is_half_hour_boundary(args.replay_time):
+        print("error: --time must be on a 00 or 30 minute boundary", file=sys.stderr)
         return 2
 
     log_dir = DEFAULT_LOG_DIR
     log_prefix = DEFAULT_LOG_PREFIX
     bundle_map_file = DEFAULT_BUNDLE_MAP_FILE
     log_files = find_log_files(log_dir, log_prefix)
-    latest_log_file = log_files[0]
-    window_seconds = args.min * 60
     send_alerts = not args.no_alert
 
     bundle_map = load_bundle_map(bundle_map_file)
-    if args.replay_from and args.replay_to:
-        replay_start_time = args.replay_from.timestamp()
-        replay_end_time = args.replay_to.timestamp()
-        window_start_time = replay_start_time
-        while window_start_time < replay_end_time:
-            window_end_time = min(window_start_time + window_seconds, replay_end_time)
-            output_dt = datetime.fromtimestamp(window_end_time)
-            print(f"replay_window: {format_log_time(window_start_time)} -> {format_log_time(window_end_time)}")
-            run_window(
-                args,
-                log_files,
-                bundle_map,
-                window_start_time,
-                window_end_time,
-                output_dt,
-                send_alerts=False,
-            )
-            window_start_time = window_end_time
-        return 0
-
-    latest_log_time = find_latest_parsed_log_time(log_files)
-    if not latest_log_time:
-        output_text = build_output_text(
-            latest_log_file,
-            args.min,
-            "N/A",
-            0,
-            "No clicks in the current window.",
+    if args.replay_time:
+        anchor = args.replay_time
+        window_start = anchor - timedelta(minutes=30)
+        window_end = display_window_end(anchor)
+        print(
+            "replay_window: "
+            f"{window_start.strftime('%Y-%m-%d %H:%M:%S')} -> "
+            f"{window_end.strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        print(output_text)
-        output_file = write_output_file(args.output_dir, output_text, run_dt)
-        print(f"output_file: {output_file}")
-        if send_alerts:
-            drop_alert_result = maybe_send_click_drop_alert(
-                args.output_dir,
-                run_dt,
-                0,
-                latest_log_file,
-                "N/A",
-                output_file,
-            )
-            if drop_alert_result:
-                print(f"click_drop_alert_mail: {drop_alert_result}")
-        deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
-        print(f"cleanup_deleted: {deleted}")
-        if send_alerts:
-            alert_result = maybe_send_zero_clicks_alert(
-                args.min,
-                0,
-                latest_log_file,
-                "N/A",
-                output_file,
-            )
-            if alert_result:
-                print(f"alert_mail: {alert_result}")
+        run_window(
+            args,
+            log_files,
+            bundle_map,
+            window_start.timestamp(),
+            window_end.timestamp(),
+            anchor,
+            send_alerts=False,
+        )
         return 0
 
-    latest_log_file, window_end_time, _ = latest_log_time
-    window_start_time = window_end_time - window_seconds
+    anchor, window_start, window_end = previous_half_hour_window(run_dt)
     run_window(
         args,
         log_files,
         bundle_map,
-        window_start_time,
-        window_end_time,
-        run_dt,
+        window_start.timestamp(),
+        window_end.timestamp(),
+        anchor,
         send_alerts=send_alerts,
+        use_cursor=True,
     )
     deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
     print(f"cleanup_deleted: {deleted}")

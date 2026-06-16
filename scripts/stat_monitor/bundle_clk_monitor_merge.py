@@ -12,11 +12,12 @@
 """
 
 import argparse
+import json
 import os
 import re
 import sys
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bundle_clk_monitor import (
     DEFAULT_BUNDLE_MAP_FILE,
@@ -33,8 +34,10 @@ DEFAULT_LOG_DIR = os.getcwd()
 DEFAULT_INCREASE_DIR_NAME = "increase_info_log"
 DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat_merge"
 OUTPUT_FILE_PREFIX = "clk_stat_merge"
+DEFAULT_CURSOR_FILE_NAME = ".bundle_clk_monitor_merge.cursor.json"
 MAIL_ALERT_MINUTES = 30
 MAIL_ALERT_TO = "hanjing915@qq.com"
+TG_CHAT_IDS = "8691808668,-5361073302"
 CLICK_DROP_ALERT_THRESHOLD = 0.10
 ALERT_TARGET_NAME = "线上总计"
 LOG_FILE_RE = re.compile(
@@ -88,17 +91,23 @@ def parse_log_file_name(name: str) -> Optional[Tuple[str, int]]:
     return match.group("date"), int(match.group("part"))
 
 
-def find_main_log_files(log_dir: str, target_date: str, window_start: datetime) -> List[str]:
+def find_main_log_files(
+    log_dir: str,
+    target_date: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> List[str]:
     """Find current-directory info logs for the target date and likely window."""
     try:
         names = os.listdir(log_dir)
     except OSError as exc:
         raise RuntimeError(f"cannot list log dir {log_dir}: {exc}") from exc
 
-    selected = []
+    candidates = []
+    day_start_ts = datetime.strptime(target_date, "%Y-%m-%d").timestamp()
     window_start_ts = window_start.timestamp()
+    window_end_ts = window_end.timestamp()
     for name in names:
-        # 主日志先按日志文件日期和文件最后修改时间粗筛，真正的时间窗口过滤交给 scan_window_clicks。
         parsed = parse_log_file_name(name)
         if not parsed:
             continue
@@ -106,9 +115,21 @@ def find_main_log_files(log_dir: str, target_date: str, window_start: datetime) 
         if file_date != target_date:
             continue
         path = os.path.join(log_dir, name)
-        if os.path.isfile(path) and os.path.getmtime(path) >= window_start_ts:
-            selected.append((part, name, path))
-    return [path for _, _, path in sorted(selected)]
+        if os.path.isfile(path):
+            candidates.append((part, name, path, os.path.getmtime(path)))
+
+    candidates.sort()
+    selected_indexes = set()
+    for index, (_, _, _, file_end_ts) in enumerate(candidates):
+        # 日志按 part 递增；当前分片大致覆盖“上一分片结束 -> 当前分片结束”。
+        file_start_ts = candidates[index - 1][3] if index > 0 else day_start_ts
+        if file_end_ts < window_start_ts or file_start_ts > window_end_ts:
+            continue
+        selected_indexes.add(index)
+        if index > 0:
+            selected_indexes.add(index - 1)
+
+    return [candidates[index][2] for index in sorted(selected_indexes)]
 
 
 def parse_increase_log_time(name: str) -> Optional[datetime]:
@@ -143,14 +164,102 @@ def find_increase_log_files(increase_dir: str, window_start: datetime, anchor: d
     return [path for _, _, path in sorted(selected)]
 
 
+def get_cursor_file_path(output_dir: str, cursor_file: Optional[str]) -> str:
+    """Return the state file used by automatic mode to resume the active main log."""
+    if cursor_file:
+        return os.path.abspath(cursor_file)
+    return os.path.join(os.path.abspath(output_dir), DEFAULT_CURSOR_FILE_NAME)
+
+
+def load_scan_cursor(cursor_file: str, main_log_files: List[str], window_start: datetime) -> Dict[str, int]:
+    """Load a saved main-log read position when it is safe for the current automatic window."""
+    try:
+        with open(cursor_file, "r", encoding="utf-8") as f:
+            cursor = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"warning: cannot read merge cursor {cursor_file}: {exc}", file=sys.stderr)
+        return {}
+
+    if not isinstance(cursor, dict):
+        return {}
+
+    log_file = cursor.get("log_file")
+    position = cursor.get("position")
+    cursor_time = cursor.get("log_time")
+    if not isinstance(log_file, str) or not isinstance(position, int) or position <= 0:
+        return {}
+    if log_file not in main_log_files:
+        return {}
+    if isinstance(cursor_time, (int, float)) and cursor_time > window_start.timestamp():
+        return {}
+
+    try:
+        if os.path.getsize(log_file) < position:
+            return {}
+    except OSError as exc:
+        print(f"warning: cannot stat merge cursor log {log_file}: {exc}", file=sys.stderr)
+        return {}
+
+    return {log_file: position}
+
+
+def save_scan_cursor(cursor_file: str, cursor: Dict[str, Any]) -> None:
+    """Persist the next automatic-mode scan position."""
+    try:
+        cursor_dir = os.path.dirname(cursor_file)
+        if cursor_dir:
+            os.makedirs(cursor_dir, exist_ok=True)
+        with open(cursor_file, "w", encoding="utf-8") as f:
+            json.dump(cursor, f, ensure_ascii=False, sort_keys=True)
+            f.write("\n")
+    except OSError as exc:
+        print(f"warning: cannot write merge cursor {cursor_file}: {exc}", file=sys.stderr)
+
+
+def clear_scan_cursor(cursor_file: str) -> None:
+    """Remove the automatic-mode scan cursor when the tracked log reached EOF."""
+    try:
+        os.remove(cursor_file)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"warning: cannot remove merge cursor {cursor_file}: {exc}", file=sys.stderr)
+
+
+def update_scan_cursor(
+    cursor_file: str,
+    main_log_files: List[str],
+    file_positions: Dict[str, Dict[str, Any]],
+) -> None:
+    """Keep a cursor only for the latest main log that stopped before EOF."""
+    for log_file in reversed(main_log_files):
+        file_state = file_positions.get(log_file)
+        if not file_state:
+            continue
+        if file_state.get("reached_eof"):
+            continue
+
+        cursor = {
+            "log_file": log_file,
+            "position": int(file_state.get("end_position", 0)),
+            "log_time": file_state.get("next_log_time"),
+            "log_time_display": file_state.get("next_log_time_display"),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if cursor["position"] > 0:
+            save_scan_cursor(cursor_file, cursor)
+            return
+
+    clear_scan_cursor(cursor_file)
+
+
 def write_output_file(output_dir: str, output_text: str, output_dt: datetime) -> str:
     """Write this run to clk_stat_merge.YYYYMMDD-HHMM and return the file path."""
     os.makedirs(output_dir, exist_ok=True)
     output_file = get_output_file_path(output_dir, output_dt)
-    append_mode = os.path.exists(output_file)
-    with open(output_file, "a", encoding="utf-8") as f:
-        if append_mode:
-            f.write("\n" + "=" * 80 + "\n")
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(output_text)
         f.write("\n")
     return output_file
@@ -162,7 +271,7 @@ def get_output_file_path(output_dir: str, run_dt: datetime) -> str:
 
 
 def read_total_clicks_from_output(path: str) -> Optional[int]:
-    """读取 clk_stat_merge 文件里的 total_clicks；追加写入时取最后一次结果。"""
+    """读取 clk_stat_merge 文件里的 total_clicks；兼容历史追加文件，取最后一次结果。"""
     totals = []
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -182,26 +291,74 @@ def read_total_clicks_from_output(path: str) -> Optional[int]:
     return totals[-1]
 
 
+def ensure_send_mail_module_path() -> None:
+    """Add the adjacent send_mail directory to sys.path for alert helpers."""
+    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
+    if send_mail_dir not in sys.path:
+        sys.path.insert(0, send_mail_dir)
+
+
+def send_alert_mail(subject: str, content: str, warning_name: str) -> str:
+    """Send an alert mail and keep errors non-fatal for monitor runs."""
+    ensure_send_mail_module_path()
+    try:
+        from send_mail import send_mail
+    except Exception as exc:
+        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    result = send_mail(subject, content, MAIL_ALERT_TO)
+    if result != "sent":
+        print(f"warning: {warning_name} mail result: {result}", file=sys.stderr)
+    return result
+
+
+def get_tg_chat_ids() -> List[str]:
+    """Return configured Telegram chat ids from the script constant."""
+    if isinstance(TG_CHAT_IDS, str):
+        return [chat_id.strip() for chat_id in TG_CHAT_IDS.split(",") if chat_id.strip()]
+    return [str(chat_id).strip() for chat_id in TG_CHAT_IDS if str(chat_id).strip()]
+
+
+def send_alert_tg(content: str, warning_name: str) -> str:
+    """Send a Telegram alert with the same body content as the alert mail."""
+    ensure_send_mail_module_path()
+    try:
+        from send_tg import send_telegram
+    except Exception as exc:
+        print(f"warning: cannot import send_tg.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    chat_ids = get_tg_chat_ids()
+    if not chat_ids:
+        print("warning: telegram alert chat id is missing", file=sys.stderr)
+        return "failed"
+
+    results = [send_telegram(chat_id, content) for chat_id in chat_ids]
+    result = "sent" if all(item == "sent" for item in results) else "failed"
+    if result != "sent":
+        print(f"warning: {warning_name} tg result: {','.join(results)}", file=sys.stderr)
+    return result
+
+
+def send_alert_notifications(subject: str, content: str, warning_name: str) -> Dict[str, str]:
+    """Send an alert through mail and Telegram using the same body content."""
+    return {
+        "mail": send_alert_mail(subject, content, warning_name),
+        "tg": send_alert_tg(content, warning_name),
+    }
+
+
 def maybe_send_zero_clicks_alert(
     minutes: int,
     total_clicks: int,
     latest_log_file: str,
     scanned_range: str,
     output_file: str,
-) -> Optional[str]:
-    """满足 30 分钟以上且零点击时，通过 send_mail.py 发送报警邮件。"""
+) -> Optional[Dict[str, str]]:
+    """满足 30 分钟以上且零点击时，发送邮件和 Telegram 报警。"""
     if minutes < MAIL_ALERT_MINUTES or total_clicks != 0:
         return None
-
-    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
-    if send_mail_dir not in sys.path:
-        sys.path.insert(0, send_mail_dir)
-
-    try:
-        from send_mail import send_mail
-    except Exception as exc:
-        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
-        return "failed"
 
     subject = f"[clk_monitor] {ALERT_TARGET_NAME} {minutes} minutes zero clicks alert"
     content = "\n".join(
@@ -215,10 +372,7 @@ def maybe_send_zero_clicks_alert(
             f"输出文件 output_file: {output_file}",
         ]
     )
-    result = send_mail(subject, content, MAIL_ALERT_TO)
-    if result != "sent":
-        print(f"warning: zero clicks alert mail result: {result}", file=sys.stderr)
-    return result
+    return send_alert_notifications(subject, content, "zero clicks alert")
 
 
 def maybe_send_click_drop_alert(
@@ -228,8 +382,8 @@ def maybe_send_click_drop_alert(
     latest_log_file: str,
     scanned_range: str,
     output_file: str,
-) -> Optional[str]:
-    """对比昨天同时间总点击，下降超过阈值时发送报警邮件。"""
+) -> Optional[Dict[str, str]]:
+    """对比昨天同时间总点击，下降超过阈值时发送邮件和 Telegram 报警。"""
     yesterday_dt = run_dt - timedelta(days=1)
     yesterday_file = get_output_file_path(output_dir, yesterday_dt)
     yesterday_total_clicks = read_total_clicks_from_output(yesterday_file)
@@ -245,16 +399,6 @@ def maybe_send_click_drop_alert(
     drop_ratio = (yesterday_total_clicks - total_clicks) / yesterday_total_clicks
     if drop_ratio <= CLICK_DROP_ALERT_THRESHOLD:
         return None
-
-    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
-    if send_mail_dir not in sys.path:
-        sys.path.insert(0, send_mail_dir)
-
-    try:
-        from send_mail import send_mail
-    except Exception as exc:
-        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
-        return "failed"
 
     drop_percent = drop_ratio * 100
     subject = f"[clk_monitor] {ALERT_TARGET_NAME} clicks dropped {drop_percent:.1f}% alert"
@@ -273,10 +417,7 @@ def maybe_send_click_drop_alert(
             f"昨日文件 yesterday_output_file: {yesterday_file}",
         ]
     )
-    result = send_mail(subject, content, MAIL_ALERT_TO)
-    if result != "sent":
-        print(f"warning: click drop alert mail result: {result}", file=sys.stderr)
-    return result
+    return send_alert_notifications(subject, content, "click drop alert")
 
 
 def cleanup_old_outputs(output_dir: str, retention_days: int, now_dt: datetime) -> int:
@@ -320,30 +461,38 @@ def run_window(
     window_start: datetime,
     anchor: datetime,
     send_alerts: bool,
+    use_cursor: bool = False,
 ) -> None:
     """扫描一个半小时窗口，输出统计结果并按需发送报警。"""
     window_end = display_window_end(anchor)
-    main_log_files = find_main_log_files(log_dir, window_start.strftime("%Y-%m-%d"), window_start)
+    main_log_files = find_main_log_files(log_dir, window_start.strftime("%Y-%m-%d"), window_start, window_end)
     # 跨零点窗口要额外带上结束日期的主日志，避免 23:30-23:59 这类窗口附近漏文件。
     if window_end.strftime("%Y-%m-%d") != window_start.strftime("%Y-%m-%d"):
-        main_log_files.extend(find_main_log_files(log_dir, window_end.strftime("%Y-%m-%d"), window_start))
+        main_log_files.extend(find_main_log_files(log_dir, window_end.strftime("%Y-%m-%d"), window_start, window_end))
     increase_log_files = find_increase_log_files(increase_dir, window_start, anchor)
     selected_log_files = main_log_files + increase_log_files
     selected_log_file_text = join_log_file_names(selected_log_files)
     scanned_range = f"{window_start.strftime('%Y-%m-%d %H:%M:%S')} -> {window_end.strftime('%Y-%m-%d %H:%M:%S')}"
+    cursor_file = get_cursor_file_path(args.output_dir, args.cursor_file)
+    start_positions = load_scan_cursor(cursor_file, main_log_files, window_start) if use_cursor else {}
 
     if selected_log_files:
         # 统计规则完全复用原脚本：解析 postshow、过滤域名、click_id 去重并归因 bundle。
-        window_events, _ = scan_window_clicks(
+        window_events, stats = scan_window_clicks(
             selected_log_files,
             window_start.timestamp(),
             window_end.timestamp(),
             bundle_map,
+            start_positions=start_positions,
         )
+        if use_cursor:
+            update_scan_cursor(cursor_file, main_log_files, stats.get("file_positions", {}))
         rows = build_rows(window_events)
     else:
         window_events = []
         rows = []
+        if use_cursor:
+            clear_scan_cursor(cursor_file)
 
     output_text = build_output_text(
         selected_log_file_text,
@@ -369,7 +518,8 @@ def run_window(
         output_file,
     )
     if drop_alert_result:
-        print(f"click_drop_alert_mail: {drop_alert_result}")
+        print(f"click_drop_alert_mail: {drop_alert_result.get('mail')}")
+        print(f"click_drop_alert_tg: {drop_alert_result.get('tg')}")
     alert_result = maybe_send_zero_clicks_alert(
         30,
         len(window_events),
@@ -378,7 +528,8 @@ def run_window(
         output_file,
     )
     if alert_result:
-        print(f"alert_mail: {alert_result}")
+        print(f"alert_mail: {alert_result.get('mail')}")
+        print(f"alert_tg: {alert_result.get('tg')}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -395,6 +546,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="directory to write clk_stat_merge.YYYYMMDD-hhmm")
     parser.add_argument("--retention-days", type=int, default=3, help="days to keep clk_stat_merge.* outputs")
+    parser.add_argument("--cursor-file", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--run-at", type=parse_replay_time, default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -431,7 +583,16 @@ def main() -> int:
         return 0
 
     anchor, window_start, _ = previous_half_hour_window(run_dt)
-    run_window(args, log_dir, increase_dir, bundle_map, window_start, anchor, send_alerts=True)
+    run_window(
+        args,
+        log_dir,
+        increase_dir,
+        bundle_map,
+        window_start,
+        anchor,
+        send_alerts=True,
+        use_cursor=args.run_at is None,
+    )
     print(f"cleanup_deleted: {cleanup_old_outputs(args.output_dir, args.retention_days, run_dt)}")
     return 0
 
