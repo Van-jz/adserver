@@ -1,0 +1,5 @@
+SMTP_HOST=smtp.titan.email
+SMTP_PORT=465
+SMTP_USER=contact@globalgoogleplay.com
+SMTP_PASS=
+TELEGRAM_BOT_TOKEN=BotToken
