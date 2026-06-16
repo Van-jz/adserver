@@ -290,27 +290,26 @@ def update_bundle_map_entry(
     click_id: str,
     referrer_package: str,
     logger: Optional[logging.Logger] = None
-) -> Tuple[bool, bool]:
+) -> Tuple[bool, bool, bool]:
     """
     新增或刷新 click_id 的 timestamp。
 
     Returns:
-        (changed, is_new)
+        (changed, is_new, is_mismatch)
     """
     now_ts = int(time.time())
     entry = bundle_map.get(click_id)
     if entry is None:
         bundle_map[click_id] = {'bundle': referrer_package, 'timestamp': now_ts}
-        return True, True
+        return True, True, False
 
     existing_bundle = get_bundle_from_map_entry(entry)
-    if existing_bundle and existing_bundle != referrer_package:
-        _bundle_map_warn(logger, f"click_id {click_id} 的 bundle 不一致，保留旧值: {existing_bundle}, 本次: {referrer_package}")
+    is_mismatch = bool(existing_bundle and existing_bundle != referrer_package)
 
     bundle = existing_bundle or referrer_package
     old_entry = entry.copy() if isinstance(entry, dict) else entry
     bundle_map[click_id] = {'bundle': bundle, 'timestamp': now_ts}
-    return bundle_map[click_id] != old_entry, False
+    return bundle_map[click_id] != old_entry, False, is_mismatch
 
 
 def cleanup_loaded_bundle_map(
@@ -398,6 +397,7 @@ def process_log_file_incremental(
         'matched_url_count': 0,
         'bundle_found_count': 0,  # 找到 bundle 的数量
         'bundle_timestamp_updated_count': 0,
+        'bundle_mismatch_count': 0,
         'bundle_map_migrated_count': bundle_map_load_stats['migrated'],
         'bundle_map_timestamp_fixed_count': bundle_map_load_stats['timestamp_fixed'],
         'bundle_map_invalid_count': bundle_map_load_stats['skipped_invalid'],
@@ -477,12 +477,14 @@ def process_log_file_incremental(
                                 click_id_set.add(click_id)
                                 # 保存 click_id -> bundle 映射，并刷新命中记录的 timestamp
                                 if referrer_package:
-                                    changed, is_new = update_bundle_map_entry(click_id_bundle_map, click_id, referrer_package)
+                                    changed, is_new, is_mismatch = update_bundle_map_entry(click_id_bundle_map, click_id, referrer_package)
                                     bundle_map_changed = bundle_map_changed or changed
                                     if is_new:
                                         stats['bundle_found_count'] += 1
                                     elif changed:
                                         stats['bundle_timestamp_updated_count'] += 1
+                                    if is_mismatch:
+                                        stats['bundle_mismatch_count'] += 1
                             stats['url_after_dedup'] += 1
                             should_write = not pixelid_set or (pixel_id and pixel_id in pixelid_set)
                             if should_write:
