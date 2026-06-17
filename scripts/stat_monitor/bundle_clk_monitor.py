@@ -18,16 +18,27 @@ BLOCKED_DOMAINS = ("ad.ap4r.com", "s16.kwai.net", "adx.opera.com", "liftoff-crea
 REQUEST_MARKER = "收到 kwaiadsinfo postshow 请求数据: "
 UNKNOWN_BUNDLE = "(unknown)"
 DEFAULT_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat"
+DEFAULT_MERGE_OUTPUT_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold/clk_stat_merge"
 DEFAULT_LOG_DIR = "/data/disk0/home/luoxun/logs/springboot-scaffold"
+DEFAULT_INCREASE_DIR_NAME = "increase_info_log"
 DEFAULT_LOG_PREFIX = "info.prod0320"
 DEFAULT_BUNDLE_MAP_FILE = "click_id_bundle_map.json"
 DEFAULT_CURSOR_FILE_NAME = ".bundle_clk_monitor.cursor.json"
+DEFAULT_MERGE_CURSOR_FILE_NAME = ".bundle_clk_monitor_merge.cursor.json"
+DEFAULT_OUTPUT_FILE_PREFIX = "clk_stat"
+MERGE_OUTPUT_FILE_PREFIX = "clk_stat_merge"
 LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[.,](\d{1,6}))?")
 CLICK_ID_RE = re.compile(r"(?:[?&])click_id=([^&#\s]+)")
 PIXEL_ID_RE = re.compile(r"(?:[?&])pixel_id=(\d+)")
 MAIL_ALERT_MINUTES = 30
 MAIL_ALERT_TO = "hanjing915@qq.com"
+TG_CHAT_IDS = "8691808668,-5361073302"
 CLICK_DROP_ALERT_THRESHOLD = 0.10
+MERGE_ALERT_TARGET_NAME = "线上总计"
+MERGE_LOG_FILE_RE = re.compile(
+    rf"^{re.escape(DEFAULT_LOG_PREFIX)}(?:\.[^_]+)?_(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.part_(?P<part>\d+)\.log$"
+)
+INCREASE_LOG_RE = re.compile(r"^increase_info_log\..*\.(?P<stamp>\d{8}\.\d{4})(?:\.\d+)?$")
 
 
 def script_dir() -> str:
@@ -181,6 +192,87 @@ def display_window_end(anchor: datetime) -> datetime:
     return anchor - timedelta(microseconds=1)
 
 
+def parse_merge_log_file_name(name: str) -> Optional[Tuple[str, int]]:
+    """解析 merge 模式主日志文件名，返回 (date, part)。"""
+    match = MERGE_LOG_FILE_RE.match(name)
+    if not match:
+        return None
+    return match.group("date"), int(match.group("part"))
+
+
+def find_merge_main_log_files(
+    log_dir: str,
+    target_date: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> List[str]:
+    """查找 merge 模式下可能覆盖统计窗口的主机分片日志。"""
+    try:
+        names = os.listdir(log_dir)
+    except OSError as exc:
+        raise RuntimeError(f"cannot list log dir {log_dir}: {exc}") from exc
+
+    candidates = []
+    day_start_ts = datetime.strptime(target_date, "%Y-%m-%d").timestamp()
+    window_start_ts = window_start.timestamp()
+    window_end_ts = window_end.timestamp()
+    for name in names:
+        parsed = parse_merge_log_file_name(name)
+        if not parsed:
+            continue
+        file_date, part = parsed
+        if file_date != target_date:
+            continue
+        path = os.path.join(log_dir, name)
+        if os.path.isfile(path):
+            candidates.append((part, name, path, os.path.getmtime(path)))
+
+    candidates.sort()
+    selected_indexes = set()
+    for index, (_, _, _, file_end_ts) in enumerate(candidates):
+        # 日志按 part 递增；当前分片大致覆盖“上一分片结束 -> 当前分片结束”。
+        file_start_ts = candidates[index - 1][3] if index > 0 else day_start_ts
+        if file_end_ts < window_start_ts or file_start_ts > window_end_ts:
+            continue
+        selected_indexes.add(index)
+        if index > 0:
+            selected_indexes.add(index - 1)
+
+    return [candidates[index][2] for index in sorted(selected_indexes)]
+
+
+def parse_increase_log_time(name: str) -> Optional[datetime]:
+    """从 increase_info_log 文件名中解析分片时间。"""
+    match = INCREASE_LOG_RE.match(name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group("stamp"), "%Y%m%d.%H%M")
+    except ValueError:
+        return None
+
+
+def find_increase_log_files(increase_dir: str, window_start: datetime, anchor: datetime) -> List[str]:
+    """查找分片结束时间落在统计窗口内的 increase_info_log 文件。"""
+    try:
+        names = os.listdir(increase_dir)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RuntimeError(f"cannot list increase log dir {increase_dir}: {exc}") from exc
+
+    selected = []
+    for name in names:
+        # 增量日志按 5 分钟分片结束时间命名；例如 1600 覆盖 15:55-15:59。
+        log_time = parse_increase_log_time(name)
+        if log_time is None or log_time <= window_start or log_time > anchor:
+            continue
+        path = os.path.join(increase_dir, name)
+        if os.path.isfile(path):
+            selected.append((log_time, name, path))
+    return [path for _, _, path in sorted(selected)]
+
+
 def parse_json_data(request_body_str: str) -> Optional[Dict[str, Any]]:
     """解析 postshow 请求体，兼容直接 JSON 和 data=URL编码JSON 两种格式。"""
     try:
@@ -295,11 +387,15 @@ def find_window_log_files(log_files: List[str], window_start_time: float, latest
     return sorted(selected, key=os.path.getmtime)
 
 
-def get_cursor_file_path(output_dir: str, cursor_file: Optional[str]) -> str:
+def get_cursor_file_path(
+    output_dir: str,
+    cursor_file: Optional[str],
+    default_file_name: str = DEFAULT_CURSOR_FILE_NAME,
+) -> str:
     """返回自动模式用来续读主机日志的游标文件路径。"""
     if cursor_file:
         return os.path.abspath(cursor_file)
-    return os.path.join(os.path.abspath(output_dir), DEFAULT_CURSOR_FILE_NAME)
+    return os.path.join(os.path.abspath(output_dir), default_file_name)
 
 
 def load_scan_cursor(cursor_file: str, log_files: List[str], window_start_time: float) -> Dict[str, int]:
@@ -641,23 +737,37 @@ def build_output_text(
     )
 
 
-def write_output_file(output_dir: str, output_text: str, run_dt: datetime) -> str:
-    """将本次统计结果写入 clk_stat.YYYYMMDD-hhmm 文件，并返回文件路径。"""
+def write_output_file(
+    output_dir: str,
+    output_text: str,
+    run_dt: datetime,
+    output_prefix: str = DEFAULT_OUTPUT_FILE_PREFIX,
+) -> str:
+    """将本次统计结果写入 {output_prefix}.YYYYMMDD-hhmm 文件，并返回文件路径。"""
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"clk_stat.{run_dt.strftime('%Y%m%d-%H%M')}")
+    output_file = get_output_file_path(output_dir, run_dt, output_prefix)
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(output_text)
         f.write("\n")
     return output_file
 
 
+def get_output_file_path(
+    output_dir: str,
+    run_dt: datetime,
+    output_prefix: str = DEFAULT_OUTPUT_FILE_PREFIX,
+) -> str:
+    """按运行时间拼出对应的统计文件路径。"""
+    return os.path.join(output_dir, f"{output_prefix}.{run_dt.strftime('%Y%m%d-%H%M')}")
+
+
 def get_clk_stat_file_path(output_dir: str, run_dt: datetime) -> str:
     """按运行时间拼出对应的 clk_stat 文件路径。"""
-    return os.path.join(output_dir, f"clk_stat.{run_dt.strftime('%Y%m%d-%H%M')}")
+    return get_output_file_path(output_dir, run_dt, DEFAULT_OUTPUT_FILE_PREFIX)
 
 
-def read_total_clicks_from_clk_stat(path: str) -> Optional[int]:
-    """读取 clk_stat 文件里的 total_clicks；兼容历史追加文件，取最后一次结果。"""
+def read_total_clicks_from_output(path: str, output_prefix: str = DEFAULT_OUTPUT_FILE_PREFIX) -> Optional[int]:
+    """读取统计文件里的 total_clicks；兼容历史追加文件，取最后一次结果。"""
     totals = []
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -668,13 +778,18 @@ def read_total_clicks_from_clk_stat(path: str) -> Optional[int]:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        print(f"warning: cannot read yesterday clk_stat {path}: {exc}", file=sys.stderr)
+        print(f"warning: cannot read yesterday {output_prefix} {path}: {exc}", file=sys.stderr)
         return None
 
     if not totals:
-        print(f"warning: cannot find total_clicks in yesterday clk_stat: {path}", file=sys.stderr)
+        print(f"warning: cannot find total_clicks in yesterday {output_prefix}: {path}", file=sys.stderr)
         return None
     return totals[-1]
+
+
+def read_total_clicks_from_clk_stat(path: str) -> Optional[int]:
+    """读取 clk_stat 文件里的 total_clicks；兼容历史追加文件，取最后一次结果。"""
+    return read_total_clicks_from_output(path, DEFAULT_OUTPUT_FILE_PREFIX)
 
 
 def get_machine_ip() -> str:
@@ -787,7 +902,6 @@ def maybe_send_click_drop_alert(
             f"本轮总点击 current_total_clicks: {total_clicks}",
             f"昨日同期总点击 yesterday_total_clicks: {yesterday_total_clicks}",
             f"下跌比例 drop_percent: {drop_percent:.2f}%",
-            f"日志文件 log_file: {latest_log_file}",
             f"扫描时间段 scanned_log_time_range: {scanned_range}",
             f"输出文件 output_file: {output_file}",
             f"昨日文件 yesterday_output_file: {yesterday_file}",
@@ -799,8 +913,143 @@ def maybe_send_click_drop_alert(
     return result
 
 
-def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: datetime) -> int:
-    """清理 output_dir 中超过保留天数的 clk_stat.* 产物，返回删除数量。"""
+def ensure_send_mail_module_path() -> None:
+    """把相邻 send_mail 目录加入 sys.path，供报警模块导入。"""
+    send_mail_dir = os.path.abspath(os.path.join(script_dir(), "..", "send_mail"))
+    if send_mail_dir not in sys.path:
+        sys.path.insert(0, send_mail_dir)
+
+
+def send_alert_mail(subject: str, content: str, warning_name: str) -> str:
+    """发送报警邮件，失败时只记录 warning，不中断监控。"""
+    ensure_send_mail_module_path()
+    try:
+        from send_mail import send_mail
+    except Exception as exc:
+        print(f"warning: cannot import send_mail.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    result = send_mail(subject, content, MAIL_ALERT_TO)
+    if result != "sent":
+        print(f"warning: {warning_name} mail result: {result}", file=sys.stderr)
+    return result
+
+
+def get_tg_chat_ids() -> List[str]:
+    """从脚本常量中读取 Telegram chat ids。"""
+    if isinstance(TG_CHAT_IDS, str):
+        return [chat_id.strip() for chat_id in TG_CHAT_IDS.split(",") if chat_id.strip()]
+    return [str(chat_id).strip() for chat_id in TG_CHAT_IDS if str(chat_id).strip()]
+
+
+def send_alert_tg(content: str, warning_name: str) -> str:
+    """用和邮件相同的正文发送 Telegram 报警。"""
+    ensure_send_mail_module_path()
+    try:
+        from send_tg import send_telegram
+    except Exception as exc:
+        print(f"warning: cannot import send_tg.py: {exc}", file=sys.stderr)
+        return "failed"
+
+    chat_ids = get_tg_chat_ids()
+    if not chat_ids:
+        print("warning: telegram alert chat id is missing", file=sys.stderr)
+        return "failed"
+
+    results = [send_telegram(chat_id, content) for chat_id in chat_ids]
+    result = "sent" if all(item == "sent" for item in results) else "failed"
+    if result != "sent":
+        print(f"warning: {warning_name} tg result: {','.join(results)}", file=sys.stderr)
+    return result
+
+
+def send_alert_notifications(subject: str, content: str, warning_name: str) -> Dict[str, str]:
+    """通过邮件和 Telegram 发送同一份报警内容。"""
+    return {
+        "mail": send_alert_mail(subject, content, warning_name),
+        "tg": send_alert_tg(content, warning_name),
+    }
+
+
+def maybe_send_merge_zero_clicks_alert(
+    minutes: int,
+    total_clicks: int,
+    latest_log_file: str,
+    scanned_range: str,
+    output_file: str,
+) -> Optional[Dict[str, str]]:
+    """merge 模式零点击时发送邮件和 Telegram 报警。"""
+    if minutes < MAIL_ALERT_MINUTES or total_clicks != 0:
+        return None
+
+    subject = f"[clk_monitor] {MERGE_ALERT_TARGET_NAME} {minutes} minutes zero clicks alert"
+    content = "\n".join(
+        [
+            f"！{MERGE_ALERT_TARGET_NAME}已经{minutes}分钟没有点击了！",
+            f"线上总计: {MERGE_ALERT_TARGET_NAME}",
+            f"统计时间窗 minutes: {minutes}",
+            f"总点击 total_clicks: {total_clicks}",
+            f"扫描时间窗 scanned_log_time_range: {scanned_range}",
+            f"输出文件 output_file: {output_file}",
+        ]
+    )
+    return send_alert_notifications(subject, content, "zero clicks alert")
+
+
+def maybe_send_merge_click_drop_alert(
+    output_dir: str,
+    run_dt: datetime,
+    total_clicks: int,
+    latest_log_file: str,
+    scanned_range: str,
+    output_file: str,
+) -> Optional[Dict[str, str]]:
+    """merge 模式对比昨天同时间总点击，下降超过阈值时发送报警。"""
+    yesterday_dt = run_dt - timedelta(days=1)
+    yesterday_file = get_output_file_path(output_dir, yesterday_dt, MERGE_OUTPUT_FILE_PREFIX)
+    yesterday_total_clicks = read_total_clicks_from_output(yesterday_file, MERGE_OUTPUT_FILE_PREFIX)
+    if yesterday_total_clicks is None:
+        print(
+            f"info: no yesterday {MERGE_OUTPUT_FILE_PREFIX} data for same time: {yesterday_file}; "
+            "skip click drop alert"
+        )
+        return None
+    if yesterday_total_clicks <= 0:
+        print(
+            f"info: yesterday total_clicks is {yesterday_total_clicks} for {yesterday_file}; skip click drop alert"
+        )
+        return None
+
+    drop_ratio = (yesterday_total_clicks - total_clicks) / yesterday_total_clicks
+    if drop_ratio <= CLICK_DROP_ALERT_THRESHOLD:
+        return None
+
+    drop_percent = drop_ratio * 100
+    subject = f"[clk_monitor] {MERGE_ALERT_TARGET_NAME} clicks dropped {drop_percent:.1f}% alert"
+    content = "\n".join(
+        [
+            f"！{MERGE_ALERT_TARGET_NAME}当轮点击较昨天同时间下降超过{CLICK_DROP_ALERT_THRESHOLD:.0%}！",
+            f"线上总计: {MERGE_ALERT_TARGET_NAME}",
+            f"当前时间 current_time: {run_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"昨日同期 yesterday_same_time: {yesterday_dt.strftime('%Y-%m-%d %H:%M')}",
+            f"本轮总点击 current_total_clicks: {total_clicks}",
+            f"昨日同期总点击 yesterday_total_clicks: {yesterday_total_clicks}",
+            f"下跌比例 drop_percent: {drop_percent:.2f}%",
+            f"扫描时间段 scanned_log_time_range: {scanned_range}",
+            f"输出文件 output_file: {output_file}",
+            f"昨日文件 yesterday_output_file: {yesterday_file}",
+        ]
+    )
+    return send_alert_notifications(subject, content, "click drop alert")
+
+
+def cleanup_old_outputs(
+    output_dir: str,
+    retention_days: int,
+    now_dt: datetime,
+    output_prefix: str = DEFAULT_OUTPUT_FILE_PREFIX,
+) -> int:
+    """清理 output_dir 中超过保留天数的统计产物，返回删除数量。"""
     cutoff_ts = (now_dt - timedelta(days=retention_days)).timestamp()
     deleted = 0
     try:
@@ -810,7 +1059,7 @@ def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: d
         return deleted
 
     for name in names:
-        if not name.startswith("clk_stat."):
+        if not name.startswith(f"{output_prefix}."):
             continue
         path = os.path.join(output_dir, name)
         if not os.path.isfile(path):
@@ -821,8 +1070,13 @@ def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: d
             os.remove(path)
             deleted += 1
         except OSError as exc:
-            print(f"warning: cannot remove old clk_stat output {path}: {exc}", file=sys.stderr)
+            print(f"warning: cannot remove old {output_prefix} output {path}: {exc}", file=sys.stderr)
     return deleted
+
+
+def cleanup_old_clk_stat_outputs(output_dir: str, retention_days: int, now_dt: datetime) -> int:
+    """清理 output_dir 中超过保留天数的 clk_stat.* 产物，返回删除数量。"""
+    return cleanup_old_outputs(output_dir, retention_days, now_dt, DEFAULT_OUTPUT_FILE_PREFIX)
 
 
 def build_scanned_range(stats: Dict[str, Any]) -> str:
@@ -897,26 +1151,135 @@ def run_window(
     return 0
 
 
+def join_log_file_names(paths: List[str]) -> str:
+    """格式化本次选中的输入文件，保持输出字段名仍为 log_file。"""
+    if not paths:
+        return "N/A"
+    return ", ".join(paths)
+
+
+def run_merge_window(
+    args: argparse.Namespace,
+    log_dir: str,
+    increase_dir: str,
+    bundle_map: Dict[str, str],
+    window_start: datetime,
+    anchor: datetime,
+    send_alerts: bool,
+    use_cursor: bool = False,
+) -> int:
+    """merge 模式：扫描主机分片日志和增量日志，输出统计结果并按需报警。"""
+    window_end = display_window_end(anchor)
+    main_log_files = find_merge_main_log_files(
+        log_dir,
+        window_start.strftime("%Y-%m-%d"),
+        window_start,
+        window_end,
+    )
+    # 跨零点窗口要额外带上结束日期的主日志，避免 23:30-23:59 这类窗口附近漏文件。
+    if window_end.strftime("%Y-%m-%d") != window_start.strftime("%Y-%m-%d"):
+        main_log_files.extend(
+            find_merge_main_log_files(
+                log_dir,
+                window_end.strftime("%Y-%m-%d"),
+                window_start,
+                window_end,
+            )
+        )
+    increase_log_files = find_increase_log_files(increase_dir, window_start, anchor)
+    selected_log_files = main_log_files + increase_log_files
+    selected_log_file_text = join_log_file_names(selected_log_files)
+    scanned_range = f"{window_start.strftime('%Y-%m-%d %H:%M:%S')} -> {window_end.strftime('%Y-%m-%d %H:%M:%S')}"
+    cursor_file = get_cursor_file_path(args.output_dir, args.cursor_file, DEFAULT_MERGE_CURSOR_FILE_NAME)
+    start_positions = load_scan_cursor(cursor_file, main_log_files, window_start.timestamp()) if use_cursor else {}
+
+    if selected_log_files:
+        # 统计规则完全复用普通模式：解析 postshow、过滤域名、click_id 去重并归因 bundle。
+        window_events, stats = scan_window_clicks(
+            selected_log_files,
+            window_start.timestamp(),
+            window_end.timestamp(),
+            bundle_map,
+            start_positions=start_positions,
+        )
+        if use_cursor:
+            update_scan_cursor(cursor_file, main_log_files, stats.get("file_positions", {}))
+        rows = build_rows(window_events)
+    else:
+        window_events = []
+        rows = []
+        if use_cursor:
+            clear_scan_cursor(cursor_file)
+
+    output_text = build_output_text(
+        selected_log_file_text,
+        30,
+        scanned_range,
+        len(window_events),
+        render_table(rows, args.top, args.all),
+    )
+    print(output_text)
+    # 输出文件按半小时锚点命名，避免 crontab 在 04/34 分运行时生成 1504/1534 这类文件。
+    output_file = write_output_file(args.output_dir, output_text, anchor, MERGE_OUTPUT_FILE_PREFIX)
+    print(f"output_file: {output_file}")
+
+    if not send_alerts:
+        return 0
+
+    drop_alert_result = maybe_send_merge_click_drop_alert(
+        args.output_dir,
+        anchor,
+        len(window_events),
+        selected_log_file_text,
+        scanned_range,
+        output_file,
+    )
+    if drop_alert_result:
+        print(f"click_drop_alert_mail: {drop_alert_result.get('mail')}")
+        print(f"click_drop_alert_tg: {drop_alert_result.get('tg')}")
+    alert_result = maybe_send_merge_zero_clicks_alert(
+        30,
+        len(window_events),
+        selected_log_file_text,
+        scanned_range,
+        output_file,
+    )
+    if alert_result:
+        print(f"alert_mail: {alert_result.get('mail')}")
+        print(f"alert_tg: {alert_result.get('tg')}")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     """定义并解析命令行参数。"""
     parser = argparse.ArgumentParser(
         description="Monitor previous half-hour click counts by bundle.",
         allow_abbrev=False,
     )
+    parser.add_argument("--merge", action="store_true", help="merge main host logs with increase_info_log files")
     parser.add_argument("--time", dest="replay_time", type=parse_replay_time, help="replay anchor time, e.g. '20260615 1600' scans the previous 30 minutes")
     parser.add_argument("--top", type=int, default=20, help="number of bundles to display")
     parser.add_argument("--all", action="store_true", help="show all bundles")
     parser.add_argument("--no-alert", action="store_true", help="do not send alert mail")
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="directory to write clk_stat.YYYYMMDD-hhmm")
-    parser.add_argument("--retention-days", type=int, default=3, help="days to keep clk_stat.* outputs")
+    parser.add_argument("--log-dir", default=None, help="directory containing log files")
+    parser.add_argument(
+        "--increase-dir",
+        default=None,
+        help="directory containing increase_info_log files; default is log-dir/increase_info_log",
+    )
+    parser.add_argument("--output-dir", default=None, help="directory to write clk_stat or clk_stat_merge outputs")
+    parser.add_argument("--retention-days", type=int, default=3, help="days to keep output files")
     parser.add_argument("--cursor-file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--run-at", type=parse_replay_time, default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> int:
     """脚本入口：确定窗口、扫描日志并输出统计表。"""
     args = parse_args()
-    run_dt = datetime.now()
+    run_dt = args.run_at or datetime.now()
+    if args.output_dir is None:
+        args.output_dir = DEFAULT_MERGE_OUTPUT_DIR if args.merge else DEFAULT_OUTPUT_DIR
     if args.top is not None and args.top <= 0:
         print("error: --top must be positive", file=sys.stderr)
         return 2
@@ -927,9 +1290,49 @@ def main() -> int:
         print("error: --time must be on a 00 or 30 minute boundary", file=sys.stderr)
         return 2
 
-    log_dir = DEFAULT_LOG_DIR
+    # merge模式：扫描主机分片日志和增量日志，输出统计结果并按需报警。
+    if args.merge:
+        log_dir = os.path.abspath(args.log_dir or os.getcwd())
+        increase_dir = os.path.abspath(args.increase_dir or os.path.join(log_dir, DEFAULT_INCREASE_DIR_NAME))
+        bundle_map = load_bundle_map(os.path.join(log_dir, DEFAULT_BUNDLE_MAP_FILE))
+
+        if args.replay_time:
+            anchor = args.replay_time
+            window_start = anchor - timedelta(minutes=30)
+            print(
+                "replay_window: "
+                f"{window_start.strftime('%Y-%m-%d %H:%M:%S')} -> "
+                f"{display_window_end(anchor).strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return run_merge_window(
+                args,
+                log_dir,
+                increase_dir,
+                bundle_map,
+                window_start,
+                anchor,
+                send_alerts=False,
+            )
+
+        anchor, window_start, _ = previous_half_hour_window(run_dt)
+        result = run_merge_window(
+            args,
+            log_dir,
+            increase_dir,
+            bundle_map,
+            window_start,
+            anchor,
+            send_alerts=not args.no_alert,
+            use_cursor=args.run_at is None,
+        )
+        deleted = cleanup_old_outputs(args.output_dir, args.retention_days, run_dt, MERGE_OUTPUT_FILE_PREFIX)
+        print(f"cleanup_deleted: {deleted}")
+        return result
+
+    # 单机模式：只扫描主机分片日志info log，输出统计结果并按需报警。
+    log_dir = os.path.abspath(args.log_dir) if args.log_dir else DEFAULT_LOG_DIR
     log_prefix = DEFAULT_LOG_PREFIX
-    bundle_map_file = DEFAULT_BUNDLE_MAP_FILE
+    bundle_map_file = os.path.join(log_dir, DEFAULT_BUNDLE_MAP_FILE) if args.log_dir else DEFAULT_BUNDLE_MAP_FILE
     log_files = find_log_files(log_dir, log_prefix)
     send_alerts = not args.no_alert
 
@@ -963,7 +1366,7 @@ def main() -> int:
         window_end.timestamp(),
         anchor,
         send_alerts=send_alerts,
-        use_cursor=True,
+        use_cursor=args.run_at is None,
     )
     deleted = cleanup_old_clk_stat_outputs(args.output_dir, args.retention_days, run_dt)
     print(f"cleanup_deleted: {deleted}")
