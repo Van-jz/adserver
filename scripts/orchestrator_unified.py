@@ -77,8 +77,8 @@ def _generate_random_android_ua() -> Tuple[str, str, str]:
     return ua, sec_ch_ua, android_ver
 
 
-def _iter_pixelid_token_rows(file_path: str) -> Iterator[Tuple[str, str, Optional[str]]]:
-    """解析 pixelid_token_cnt.txt，yield (pixelid, token, cnt_opt)"""
+def _iter_pixelid_token_rows(file_path: str) -> Iterator[Tuple[str, str, Optional[str], Optional[str]]]:
+    """解析 pixelid_token_cnt.txt，yield (pixelid, token, cnt_opt, min_value_opt)"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -91,19 +91,54 @@ def _iter_pixelid_token_rows(file_path: str) -> Iterator[Tuple[str, str, Optiona
                 pixelid, token = parts[0], parts[1]
                 if token != 'null' and not (35 <= len(token) <= 50):
                     continue
-                yield (pixelid, token, parts[2] if len(parts) >= 3 else None)
+                yield (
+                    pixelid,
+                    token,
+                    parts[2] if len(parts) >= 3 else None,
+                    parts[3] if len(parts) >= 4 else None
+                )
     except FileNotFoundError:
         print(f"警告: 文件 '{file_path}' 不存在", file=sys.stderr)
     except Exception as e:
         print(f"警告: 读取文件失败: {e}", file=sys.stderr)
 
 
-def load_pixelid_set(file_path: str) -> Set[str]:
-    """从 pixelid_token_cnt.txt 构建 pixelid 集合"""
-    s = set(r[0] for r in _iter_pixelid_token_rows(file_path))
-    if s:
-        print(f"从 {file_path} 加载了 {len(s)} 个有效 pixel_id")
-    return s
+def load_pixelid_runtime_config(
+    file_path: str,
+    cnt_rate: float,
+    logger: logging.Logger
+) -> Tuple[Set[str], Dict[str, int], Dict[str, str], Dict[str, int]]:
+    """一次读取 pixelid_token_cnt.txt，构建各步骤需要的内存配置"""
+    pixelid_set = set()
+    pixel_id_max_counts = {}
+    pixelid_token_map = {}
+    pixelid_min_value_map = {}
+
+    for pixelid, token, cnt_opt, min_value_opt in _iter_pixelid_token_rows(file_path):
+        pixelid_set.add(pixelid)
+        pixelid_token_map[pixelid] = token
+
+        if cnt_opt:
+            try:
+                pixel_id_max_counts[pixelid] = int(int(cnt_opt.replace(',', '')) * cnt_rate)
+            except ValueError:
+                logger.warning(f"pixelid '{pixelid}' 的 cnt 无效: {cnt_opt}，已忽略")
+
+        if min_value_opt:
+            try:
+                pixelid_min_value_map[pixelid] = int(min_value_opt)
+            except ValueError:
+                logger.warning(f"pixelid '{pixelid}' 的 min_value 无效: {min_value_opt}，已忽略")
+
+    if not pixelid_token_map:
+        logger.error(f"文件 '{file_path}' 不存在或为空")
+        sys.exit(1)
+
+    logger.info(f"从 {file_path} 加载了 {len(pixelid_set)} 个有效 pixel_id")
+    logger.info(f"从 {file_path} 加载了 {len(pixel_id_max_counts)} 个 pixel_id 最大值")
+    logger.info(f"从 {file_path} 加载了 {len(pixelid_token_map)} 条 pixelid-token 映射")
+    logger.info(f"从 {file_path} 加载了 {len(pixelid_min_value_map)} 条 pixelid-min_value 映射")
+    return pixelid_set, pixel_id_max_counts, pixelid_token_map, pixelid_min_value_map
 
 
 def extract_request_body(log_line: str) -> Optional[str]:
@@ -348,7 +383,7 @@ def cleanup_loaded_bundle_map(
 def process_log_file_incremental(
     file_path: str,
     output_file: str,
-    pixelid_token_cnt_file: Optional[str] = None,
+    pixelid_set: Optional[Set[str]] = None,
     start_position: int = 0,
     bundle_map_file: str = None,
     click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -362,7 +397,7 @@ def process_log_file_incremental(
     Args:
         file_path: 日志文件路径
         output_file: 输出文件路径
-        pixelid_token_cnt_file: pixelid_token_cnt.txt 文件路径
+        pixelid_set: 已加载的 pixel_id 集合
         start_position: 开始处理的文件字节位置
         bundle_map_file: click_id -> bundle 映射文件路径
         click_id_bundle_map: 已加载到内存的 click_id -> bundle 映射
@@ -373,9 +408,8 @@ def process_log_file_incremental(
     Returns:
         处理结果字典，包含统计信息和新的文件位置
     """
-    pixelid_set = set()
-    if pixelid_token_cnt_file:
-        pixelid_set = load_pixelid_set(pixelid_token_cnt_file)
+    if pixelid_set is None:
+        pixelid_set = set()
 
     # 用于 click_id 去重
     click_id_set = set()
@@ -565,20 +599,6 @@ def should_process_url(url: str, ratio: float) -> bool:
     return threshold < ratio
 
 
-def load_pixel_id_max_counts(pixelid_token_cnt_file: str, cnt_rate: float, default_max: int) -> Dict[str, int]:
-    """从 pixelid_token_cnt.txt 加载每个 pixel_id 的最大转化数"""
-    result = {}
-    for pixelid, _, cnt_opt in _iter_pixelid_token_rows(pixelid_token_cnt_file):
-        if cnt_opt:
-            try:
-                result[pixelid] = int(int(cnt_opt.replace(',', '')) * cnt_rate)
-            except ValueError:
-                pass
-    if result:
-        print(f"从 {pixelid_token_cnt_file} 加载了 {len(result)} 个 pixel_id 最大值")
-    return result
-
-
 def parse_url_pixel_id(url: str) -> Tuple[str, str]:
     """
     解析URL，提取pixel_id和click_id
@@ -622,8 +642,7 @@ def apply_frequency_control(
     max_per_pixel_id: int = 10,
     total_ratio: float = 1.0,
     target_date: str = None,
-    pixelid_token_cnt_file: str = None,
-    cnt_rate: float = 1.0,
+    pixel_id_max_counts: Optional[Dict[str, int]] = None,
     bundle_ratio: Dict[str, float] = None,
     bundle_map_file: str = None,
     click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -641,8 +660,7 @@ def apply_frequency_control(
         max_per_pixel_id: 每个pixel_id每天最大处理数（默认10）
         total_ratio: 总体处理比例（0-1，默认1.0即100%）
         target_date: 目标日期（格式：YYYY-MM-DD），如果为None则使用当前日期
-        pixelid_token_cnt_file: pixelid_token_cnt.txt 文件路径
-        cnt_rate: 转化率系数（默认1.0）
+        pixel_id_max_counts: 已加载的 pixel_id -> 最大转化数映射
         bundle_ratio: bundle -> ratio 映射字典
         bundle_map_file: click_id -> bundle 映射文件路径
         click_id_bundle_map: 已加载到内存的 click_id -> bundle 映射
@@ -651,14 +669,9 @@ def apply_frequency_control(
     Returns:
         统计信息字典
     """
-    # 加载每个pixel_id的自定义最大值
-    pixel_id_max_counts = {}
-    if pixelid_token_cnt_file:
-        pixel_id_max_counts = load_pixel_id_max_counts(
-            pixelid_token_cnt_file,
-            cnt_rate,
-            max_per_pixel_id
-        )
+    # 使用预加载的每个pixel_id自定义最大值
+    if pixel_id_max_counts is None:
+        pixel_id_max_counts = {}
 
     # 加载 click_id -> bundle 映射，并兼容迁移旧格式
     if click_id_bundle_map is None:
@@ -873,21 +886,12 @@ def _setup_logger(name: str, log_file: str) -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    for h in (logging.FileHandler(log_file, encoding='utf-8'), logging.StreamHandler()):
+    #for h in (logging.FileHandler(log_file, encoding='utf-8'), logging.StreamHandler()):
+    for h in (logging.FileHandler(log_file, encoding='utf-8'),):
         h.setLevel(logging.INFO)
         h.setFormatter(fmt)
         logger.addHandler(h)
     return logger
-
-
-def load_pixelid_token_mapping(file_path: str, logger: logging.Logger) -> Dict[str, str]:
-    """从 pixelid_token_cnt.txt 构建 pixelid->token 映射"""
-    m = {r[0]: r[1] for r in _iter_pixelid_token_rows(file_path)}
-    if not m:
-        logger.error(f"文件 '{file_path}' 不存在或为空")
-        sys.exit(1)
-    logger.info(f"加载 {len(m)} 条 pixelid-token 映射")
-    return m
 
 
 def save_pixelid_token_mapping(file_path: str, pixelid_token_map: Dict[str, str], logger: logging.Logger) -> bool:
@@ -927,16 +931,20 @@ def parse_clicks_file(file_path: str, logger: logging.Logger) -> list:
     return result
 
 
-def get_value_by_probability() -> int:
-    """按概率返回 value：20%→5, 30%→10, 20%→20, 10%→30, 10%→40, 5%→50, 5%→100"""
+def get_value_by_probability(min_value: Optional[int] = None) -> int:
+    """按 VALUE_PROBS 返回 value，并应用可选 min_value 下限和 100 上限"""
     r = random.random() * 100
+    value = 100
     for threshold, val in VALUE_PROBS:
         if r < threshold:
-            return val
-    return 100
+            value = val
+            break
+    if min_value is not None:
+        value = max(value, min_value)
+    return min(value, 100)
 
 
-def build_url(pixelid: str, click_id: str, token: str, current_href: str = None) -> List[Any]:
+def build_url(pixelid: str, click_id: str, token: str, current_href: str = None, min_value: Optional[int] = None) -> List[Any]:
     """拼接 URL：第一个必为 REGISTRATION，50% 概率追加 PURCHASE。
     token 为 'null' 时返回 POST 请求 spec（需 current_href）。"""
     if token == 'null':
@@ -1005,7 +1013,7 @@ def build_url(pixelid: str, click_id: str, token: str, current_href: str = None)
                 "sendMethod": 1,
                 "sendWithXhrAsync": False,
                 "currency": "BRL",
-                "value": get_value_by_probability(),
+                "value": get_value_by_probability(min_value),
             }
             body_pur = {
                 "clickid": click_id,
@@ -1024,7 +1032,7 @@ def build_url(pixelid: str, click_id: str, token: str, current_href: str = None)
     url1 = base.format(t=token, p=pixelid, c=click_id) + "&event_name=EVENT_COMPLETE_REGISTRATION"
     urls = [url1]
     if random.random() < 0.5:
-        urls.append(base.format(t=token, p=pixelid, c=click_id) + f"&event_name=EVENT_PURCHASE&currency=BRL&value={get_value_by_probability()}")
+        urls.append(base.format(t=token, p=pixelid, c=click_id) + f"&event_name=EVENT_PURCHASE&currency=BRL&value={get_value_by_probability(min_value)}")
     return urls
 
 
@@ -1192,9 +1200,12 @@ def process_requests(
     frequency_state_file: str,
     sleep_seconds: int = 5,
     pending_curl_file: str = None,
-    purchase_log_file: str = None
+    purchase_log_file: str = None,
+    pixelid_min_value_map: Optional[Dict[str, int]] = None
 ) -> Dict[str, int]:
     """处理所有请求"""
+    if pixelid_min_value_map is None:
+        pixelid_min_value_map = {}
     stats = {
         'total': len(clicks_data),
         'success': 0,
@@ -1217,7 +1228,7 @@ def process_requests(
                 decrement_pixel_count(frequency_state_file, pixelid, 1, logger)
             continue
 
-        urls = build_url(pixelid, click_id, token, current_href)
+        urls = build_url(pixelid, click_id, token, current_href, pixelid_min_value_map.get(pixelid))
         logger.info(f"生成 {len(urls)} 个 URL")
         stats['url_count'] += len(urls)
 
@@ -1294,7 +1305,7 @@ class Orchestrator:
 
     def setup_logging(self) -> logging.Logger:
         """配置日志"""
-        return _setup_logger('orchestrator', self.config.get('orchestrator_log', 'orchestrator.log'))
+        return _setup_logger('orchestrator', self.config.get('orchestrator_log', 'logs/orchestrator.log'))
 
     def load_config(self, config_file: str) -> Dict[str, Any]:
         """加载配置文件"""
@@ -1312,7 +1323,7 @@ class Orchestrator:
             'frequency_state_file': 'frequency_state.json',
             'state_file': 'orchestrator_state.json',
             'bundle_map_file': 'click_id_bundle_map.json',
-            'orchestrator_log': 'orchestrator.log',
+            'orchestrator_log': 'logs/orchestrator.log',
             'convert_log': 'convert_results.log',
             'purchase_log_file': 'purchase.log',
             'pending_curl_file': 'pending_curl.json',
@@ -1553,6 +1564,7 @@ class Orchestrator:
         self,
         log_file: str,
         start_position: int,
+        pixelid_set: Set[str],
         click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
         bundle_map_changed: bool = False,
         bundle_map_load_stats: Optional[Dict[str, int]] = None,
@@ -1562,7 +1574,6 @@ class Orchestrator:
         self.logger.info("步骤 1: 提取日志数据")
 
         clicks_temp_file = self.config['clicks_temp_file']
-        pixelid_token_cnt_file = self.config['pixelid_token_cnt_file']
 
         # 清空临时文件
         if clear_output:
@@ -1578,7 +1589,7 @@ class Orchestrator:
         stats = process_log_file_incremental(
             log_file,
             clicks_temp_file,
-            pixelid_token_cnt_file,
+            pixelid_set,
             start_position,
             self.bundle_map_file,
             click_id_bundle_map,
@@ -1598,7 +1609,8 @@ class Orchestrator:
 
     def run_frequency_control(
         self,
-        click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None
+        click_id_bundle_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        pixel_id_max_counts: Optional[Dict[str, int]] = None
     ) -> int:
         """运行频率控制（应用pixel_id每天x个的限制和总体比例限制），返回过滤后的URL数量"""
         self.logger.info("步骤 2: 应用频率控制和总体比例限制")
@@ -1608,8 +1620,6 @@ class Orchestrator:
         frequency_state_file = self.config['frequency_state_file']
         max_per_pixel_id = self.config.get('max_per_pixel_id', 10)
         total_ratio = self.config.get('total_ratio', 0.04)
-        pixelid_token_cnt_file = self.config.get('pixelid_token_cnt_file')
-        cnt_rate = self.config.get('cnt_rate', 1.0)
         bundle_ratio = self.config.get('bundle_ratio', {})
 
         self.logger.info(f"应用频率控制...")
@@ -1623,8 +1633,7 @@ class Orchestrator:
             max_per_pixel_id,
             total_ratio,
             None,  # target_date
-            pixelid_token_cnt_file,
-            cnt_rate,
+            pixel_id_max_counts,
             bundle_ratio,
             self.bundle_map_file,
             click_id_bundle_map,
@@ -1643,7 +1652,11 @@ class Orchestrator:
 
         return stats['total_output']
 
-    def run_convert(self) -> int:
+    def run_convert(
+        self,
+        pixelid_token_map: Dict[str, str],
+        pixelid_min_value_map: Dict[str, int]
+    ) -> int:
         """运行URL转换和请求，返回成功转化的数量"""
         self.logger.info("步骤 3: 执行 curl 请求")
 
@@ -1669,10 +1682,6 @@ class Orchestrator:
         logger.info(f"开始处理 - 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("="*80)
 
-        # 加载 pixelid-token 映射
-        logger.info("正在加载 pixelid-token 映射...")
-        pixelid_token_map = load_pixelid_token_mapping(pixelid_token_cnt_file, logger)
-
         # 解析 clicks 文件
         logger.info("正在解析 clicks 文件...")
         clicks_data = parse_clicks_file(clicks_file, logger)
@@ -1691,7 +1700,8 @@ class Orchestrator:
             frequency_state_file,
             sleep_seconds,
             self.config.get('pending_curl_file'),
-            self.config.get('purchase_log_file')
+            self.config.get('purchase_log_file'),
+            pixelid_min_value_map
         )
 
         for k, v in stats.items():
@@ -1731,6 +1741,16 @@ class Orchestrator:
             if bundle_map_dirty:
                 save_bundle_map(self.bundle_map_file, click_id_bundle_map, self.logger)
                 bundle_map_dirty = False
+
+            # 全流程只读取一次 pixelid_token_cnt.txt，后续步骤传递内存配置。
+            pixelid_token_cnt_file = self.config['pixelid_token_cnt_file']
+            cnt_rate = self.config.get('cnt_rate', 1.0)
+            (
+                pixelid_set,
+                pixel_id_max_counts,
+                pixelid_token_map,
+                pixelid_min_value_map
+            ) = load_pixelid_runtime_config(pixelid_token_cnt_file, cnt_rate, self.logger)
 
             # 步骤 0: 先执行上次 50% 概率产生的 PURCHASE curl（session_id 保持）
             pending_file = self.config.get('pending_curl_file', 'pending_curl.json')
@@ -1786,6 +1806,7 @@ class Orchestrator:
                 end_position, file_extracted_count, bundle_map_dirty = self.run_extract_log(
                     log_file,
                     start_position,
+                    pixelid_set,
                     click_id_bundle_map,
                     bundle_map_dirty,
                     {'migrated': 0, 'timestamp_fixed': 0, 'skipped_invalid': 0},
@@ -1801,10 +1822,10 @@ class Orchestrator:
                 bundle_map_dirty = False
 
             # 步骤 2: 频率控制
-            filtered_count = self.run_frequency_control(click_id_bundle_map)
+            filtered_count = self.run_frequency_control(click_id_bundle_map, pixel_id_max_counts)
 
             # 步骤 3: 执行请求
-            success_count = self.run_convert()
+            success_count = self.run_convert(pixelid_token_map, pixelid_min_value_map)
 
             # 更新状态
             new_state = {

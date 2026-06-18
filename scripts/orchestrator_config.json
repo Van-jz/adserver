@@ -11,7 +11,7 @@
   "frequency_state_file": "frequency_state.json",
   "state_file": "orchestrator_state.json",
   "bundle_map_file": "click_id_bundle_map.json",
-  "orchestrator_log": "orchestrator.log",
+  "orchestrator_log": "logs/orchestrator.log",
   "convert_log": "convert_results.log",
   "total_ratio": 0.06,
   "max_per_pixel_id": 40,
