@@ -3,11 +3,12 @@ set -euo pipefail
 
 # 删除 increase_info_log 目录中基准日期前 N 天的增量日志。
 # 默认基准日期为今天、N=1，即删除昨天；按文件名中的 YYYYMMDD 匹配，不比较 HHMM 时刻。
-# 同时按基准日前一天归档 orchestrator.log/reconvert.log，并按各自保留天数清理归档。
+# 同时按基准日前一天分别归档 orchestrator.log/reconvert.log，并按各自保留天数清理归档。
 
 INCREASE_LOG_DIR="/data/disk0/home/luoxun/logs/springboot-scaffold/increase_info_log"
 PROCESS_DIR="/data/disk0/home/luoxun/logs/springboot-scaffold"
-LOG_ARCHIVE_DIR="${PROCESS_DIR}/logs/orchestrator_log"
+ORCHESTRATOR_LOG_ARCHIVE_DIR="${PROCESS_DIR}/logs/orchestrator_log"
+RECONVERT_LOG_ARCHIVE_DIR="${PROCESS_DIR}/logs/reconvert_log"
 ORCHESTRATOR_LOG_NAME="orchestrator.log"
 RECONVERT_LOG_NAME="reconvert.log"
 ORCHESTRATOR_LOG_RETENTION_DAYS=7
@@ -102,20 +103,21 @@ date_days_ago() {
 
 archive_runtime_log() {
     local log_name="$1"
+    local archive_dir="$2"
     local active_log="${PROCESS_DIR}/logs/${log_name}"
 
     if [[ ! -f "$active_log" ]]; then
         return 1
     fi
 
-    local archive_file="${LOG_ARCHIVE_DIR}/${log_name}.${LOG_ARCHIVE_DATE}"
+    local archive_file="${archive_dir}/${log_name}.${LOG_ARCHIVE_DATE}"
 
     if [[ "$DRY_RUN" == true ]]; then
         echo "[dry-run] 将归档: $active_log -> $archive_file"
         return
     fi
 
-    mkdir -p -- "$LOG_ARCHIVE_DIR"
+    mkdir -p -- "$archive_dir"
     mv -f -- "$active_log" "$archive_file"
     touch -- "$active_log"
     echo "运行日志处理完成: 日志=$log_name, 归档日期=$LOG_ARCHIVE_DATE, 文件=$archive_file"
@@ -124,9 +126,10 @@ archive_runtime_log() {
 cleanup_runtime_log_archives() {
     local log_name="$1"
     local delete_date="$2"
+    local archive_dir="$3"
 
-    if [[ ! -d "$LOG_ARCHIVE_DIR" ]]; then
-        echo "跳过运行日志归档清理: 目录不存在: $LOG_ARCHIVE_DIR"
+    if [[ ! -d "$archive_dir" ]]; then
+        echo "跳过运行日志归档清理: 目录不存在: $archive_dir"
         return
     fi
 
@@ -134,7 +137,7 @@ cleanup_runtime_log_archives() {
     local file
     while IFS= read -r -d '' file; do
         files+=("$file")
-    done < <(find "$LOG_ARCHIVE_DIR" -maxdepth 1 -type f -name "${log_name}.${delete_date}*" -print0)
+    done < <(find "$archive_dir" -maxdepth 1 -type f -name "${log_name}.${delete_date}*" -print0)
 
     if [[ ${#files[@]} -eq 0 ]]; then
         echo "无需清理运行日志归档: 日志=$log_name, 日期=$delete_date"
@@ -149,7 +152,7 @@ cleanup_runtime_log_archives() {
         fi
     done
 
-    echo "运行日志归档清理完成: 日志=$log_name, 匹配=${#files[@]}, 删除日期=$delete_date, 目录=$LOG_ARCHIVE_DIR"
+    echo "运行日志归档清理完成: 日志=$log_name, 匹配=${#files[@]}, 删除日期=$delete_date, 目录=$archive_dir"
 }
 
 main() {
@@ -195,12 +198,12 @@ main() {
     echo "清理完成: 匹配=$matched, 删除=$deleted, 基准日期=$BASE_DATE, 删除日期=$DELETE_DATE, 目录=$INCREASE_LOG_DIR"
 
     # 归档并清理orchestrator.log
-    if archive_runtime_log "$ORCHESTRATOR_LOG_NAME"; then
-        cleanup_runtime_log_archives "$ORCHESTRATOR_LOG_NAME" "$(date_days_ago "$ORCHESTRATOR_LOG_RETENTION_DAYS")"
+    if archive_runtime_log "$ORCHESTRATOR_LOG_NAME" "$ORCHESTRATOR_LOG_ARCHIVE_DIR"; then
+        cleanup_runtime_log_archives "$ORCHESTRATOR_LOG_NAME" "$(date_days_ago "$ORCHESTRATOR_LOG_RETENTION_DAYS")" "$ORCHESTRATOR_LOG_ARCHIVE_DIR"
     fi
     # 归档并清理reconvert.log
-    if archive_runtime_log "$RECONVERT_LOG_NAME"; then
-        cleanup_runtime_log_archives "$RECONVERT_LOG_NAME" "$(date_days_ago "$RECONVERT_LOG_RETENTION_DAYS")"
+    if archive_runtime_log "$RECONVERT_LOG_NAME" "$RECONVERT_LOG_ARCHIVE_DIR"; then
+        cleanup_runtime_log_archives "$RECONVERT_LOG_NAME" "$(date_days_ago "$RECONVERT_LOG_RETENTION_DAYS")" "$RECONVERT_LOG_ARCHIVE_DIR"
     fi
 }
 
