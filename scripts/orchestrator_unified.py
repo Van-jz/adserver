@@ -122,13 +122,13 @@ def load_pixelid_runtime_config(
             try:
                 pixel_id_max_counts[pixelid] = int(int(cnt_opt.replace(',', '')) * cnt_rate)
             except ValueError:
-                logger.warning(f"pixelid '{pixelid}' 的 cnt 无效: {cnt_opt}，已忽略")
+                pass
 
         if min_value_opt:
             try:
                 pixelid_min_value_map[pixelid] = int(min_value_opt)
             except ValueError:
-                logger.warning(f"pixelid '{pixelid}' 的 min_value 无效: {min_value_opt}，已忽略")
+                pass
 
     if not pixelid_token_map:
         logger.error(f"文件 '{file_path}' 不存在或为空")
