@@ -19,18 +19,18 @@
   "sleep_seconds": 1,
   "bundle_map_retention_days": -1,
   "bundle_ratio": {
-    "com.aniyomianimes.traillermovies": 0.09,
+    "com.aniyomianimes.traillermovies": 0.12,
     "com.Hadiz.Holeucaneat": 0.06,
     "com.happy.balls.dropmerge": 0.06,
     "com.Hadiz.Yogaflex": 0.06,
 
     "com.arlonstudio.smash": 0.072,
-    "com.armg.puzzle.blast.blob": 0.072,
-    "com.nazer.gaming.blockfill": 0.072,
+    "com.armg.puzzle.blast.blob": 0.10,
+    "com.nazer.gaming.blockfill": 0.10,
 
-    "com.sweet.bloco.quebra": 0.072,
+    "com.sweet.bloco.quebra": 0.10,
     "com.beemdevelopment.aegis": 0.06,
     "com.israbyte.calbin":0.072,
-    "com.awedea.nyx": 0.09
+    "com.awedea.nyx": 0.12
   }
 }
